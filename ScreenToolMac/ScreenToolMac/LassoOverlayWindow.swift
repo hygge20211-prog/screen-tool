@@ -104,14 +104,11 @@ class LassoContentView: NSView {
         hintLabel.drawsBackground = false
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        [cancelBtn, clearBtn, confirmBtn, hintLabel].forEach {
-            ($0 as AnyObject).setValue(false, forKey: "translatesAutoresizingMaskIntoConstraints")
-            addSubview($0 as! NSView)
+        let controls: [NSView] = [cancelBtn, clearBtn, confirmBtn, hintLabel]
+        for control in controls {
+            control.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(control)
         }
-
-        cancelBtn.translatesAutoresizingMaskIntoConstraints = false
-        clearBtn.translatesAutoresizingMaskIntoConstraints = false
-        confirmBtn.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
             hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -245,12 +242,19 @@ extension NSBezierPath {
         let path = CGMutablePath()
         var pts = [NSPoint](repeating: .zero, count: 3)
         for i in 0..<elementCount {
-            switch element(at: i, associatedPoints: &pts) {
+            let type = element(at: i, associatedPoints: &pts)
+            switch type {
             case .moveTo:    path.move(to: pts[0])
             case .lineTo:    path.addLine(to: pts[0])
             case .curveTo:   path.addCurve(to: pts[2], control1: pts[0], control2: pts[1])
             case .closePath: path.closeSubpath()
-            @unknown default: break
+            default:
+                // macOS 14 added .cubicCurveTo / .quadraticCurveTo (raw values 4 / 5)
+                if type.rawValue == 4 {        // cubicCurveTo: 2 control points + end
+                    path.addCurve(to: pts[2], control1: pts[0], control2: pts[1])
+                } else if type.rawValue == 5 { // quadraticCurveTo: 1 control point + end
+                    path.addQuadCurve(to: pts[1], control: pts[0])
+                }
             }
         }
         return path

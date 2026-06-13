@@ -6,6 +6,10 @@ class CaptureCoordinator: NSObject {
     private var capturedCGImage: CGImage?
     private var captureScale: CGFloat = 1.0
 
+    /// Called when the capture flow ends (confirmed, cancelled, or permission denied),
+    /// so the caller can restore any window it hid before capturing.
+    var onCaptureFinished: (() -> Void)?
+
     // MARK: - Start
 
     func startCapture() {
@@ -14,6 +18,7 @@ class CaptureCoordinator: NSObject {
 
         guard let img = CGDisplayCreateImage(displayID) else {
             showPermissionAlert()
+            onCaptureFinished?()
             return
         }
         capturedCGImage = img
@@ -80,6 +85,7 @@ extension CaptureCoordinator: LassoOverlayDelegate {
     func lassoDidConfirm(path: NSBezierPath, canvasSize: NSSize, scale: CGFloat) {
         overlayPanel?.orderOut(nil)
         overlayPanel = nil
+        defer { onCaptureFinished?() } // always restore the hidden window
 
         guard let cgImg = capturedCGImage else { return }
         capturedCGImage = nil
@@ -96,6 +102,7 @@ extension CaptureCoordinator: LassoOverlayDelegate {
         overlayPanel?.orderOut(nil)
         overlayPanel = nil
         capturedCGImage = nil
+        onCaptureFinished?()
     }
 
     // MARK: - Toast

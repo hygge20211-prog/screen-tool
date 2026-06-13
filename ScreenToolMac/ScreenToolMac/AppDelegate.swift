@@ -11,6 +11,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         // Trigger macOS Screen Recording permission prompt on first launch
         _ = CGDisplayCreateImage(CGMainDisplayID())
+        // Restore the gallery window when capture finishes/cancels
+        coordinator.onCaptureFinished = { [weak self] in
+            self?.galleryWindow?.makeKeyAndOrderFront(nil)
+        }
+        // Show the main window right away so the app is easy to find
+        openGallery()
+    }
+
+    // Reopen the gallery window when the Dock icon is clicked
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { openGallery() }
+        return true
+    }
+
+    // MARK: - Capture (hide window first so it isn't in the shot)
+
+    @objc func startCaptureHidingWindow() {
+        galleryWindow?.orderOut(nil)
+        // Let the window disappear before grabbing the screen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.coordinator.startCapture()
+        }
     }
 
     // MARK: - Status Bar
@@ -44,12 +66,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startCapture() {
-        coordinator.startCapture()
+        startCaptureHidingWindow()
     }
 
     @objc func openGallery() {
         if galleryWindow == nil {
-            let view = GalleryView().environmentObject(DataStore.shared)
+            let view = GalleryView(onCapture: { [weak self] in self?.startCaptureHidingWindow() })
+                .environmentObject(DataStore.shared)
             let hosting = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: hosting)
             win.title = "截图库"

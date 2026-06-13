@@ -5,6 +5,14 @@ import AppKit
 
 struct GalleryView: View {
     @EnvironmentObject var store: DataStore
+    let onCapture: () -> Void
+
+    // Explicit init so it stays callable despite the private @State below
+    // (a synthesized memberwise init would be private).
+    init(onCapture: @escaping () -> Void = {}) {
+        self.onCapture = onCapture
+    }
+
     @State private var selectedFolderId: UUID? = nil   // nil = "全部"
     @State private var isAllSelected = true
     @State private var selectedScreenshots: Set<UUID> = []
@@ -82,6 +90,12 @@ struct GalleryView: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
+            Button(action: onCapture) {
+                Label("截图", systemImage: "camera.viewfinder")
+            }
+            .keyboardShortcut("5", modifiers: [.command, .shift])
+            .help("框选屏幕上的任意区域进行截图")
+
             Text(isAllSelected ? "全部截图" : (store.folders.first(where: { $0.id == selectedFolderId })?.name ?? ""))
                 .font(.headline)
 
@@ -169,7 +183,7 @@ struct GalleryView: View {
             Text("还没有截图")
                 .font(.title2)
                 .foregroundColor(.secondary)
-            Text("点击菜单栏图标或按 ⌘⇧5 开始截图")
+            Text("点击左上角「截图」按钮，或按 ⌘⇧5 开始截图")
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
