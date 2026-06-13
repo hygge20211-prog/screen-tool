@@ -72,7 +72,7 @@ class FloatingScreenshotButton: UIButton {
         layer.shadowRadius = 6
         layer.shadowOffset = CGSize(width: 0, height: 3)
 
-        let icon = UIImageView(image: UIImage(systemName: "camera.viewfinder"))
+        let icon = UIImageView(image: UIImage(systemName: "photo.badge.plus"))
         icon.tintColor = .white
         icon.contentMode = .scaleAspectFit
         icon.translatesAutoresizingMaskIntoConstraints = false

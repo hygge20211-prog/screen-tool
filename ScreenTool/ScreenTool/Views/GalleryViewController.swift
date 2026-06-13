@@ -1,5 +1,6 @@
 import UIKit
 import Photos
+import PhotosUI
 
 class GalleryViewController: UIViewController {
 
@@ -7,6 +8,7 @@ class GalleryViewController: UIViewController {
     private var currentFolderId: UUID?
     private var isSelecting = false
     private var selectedIds: Set<UUID> = []
+    weak var coordinator: MainCoordinator?
 
     private lazy var collectionView: UICollectionView = {
         let layout = UICollectionViewFlowLayout()
@@ -70,9 +72,14 @@ class GalleryViewController: UIViewController {
         selectBarButton = UIBarButtonItem(title: "选择", style: .plain, target: self, action: #selector(toggleSelect))
         exportBarButton = UIBarButtonItem(title: "保存到相册", style: .plain, target: self, action: #selector(exportSelected))
         addFolderButton = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addFolder))
+        let importButton = UIBarButtonItem(image: UIImage(systemName: "photo.badge.plus"), style: .plain, target: self, action: #selector(importFromPhotos))
         exportBarButton.isEnabled = false
-        navigationItem.rightBarButtonItems = [selectBarButton, exportBarButton]
+        navigationItem.rightBarButtonItems = [selectBarButton, exportBarButton, importButton]
         navigationItem.leftBarButtonItem = addFolderButton
+    }
+
+    @objc private func importFromPhotos() {
+        coordinator?.importFromPhotos(presentingVC: self)
     }
 
     private func bindDataStore() {

@@ -20,6 +20,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         let coordinator = MainCoordinator()
         coordinator.start(in: windowScene, mainWindow: mainWindow)
+        gallery.coordinator = coordinator
         self.coordinator = coordinator
     }
 }

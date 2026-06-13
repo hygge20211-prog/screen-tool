@@ -22,6 +22,8 @@
 	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>需要相册权限以保存截图</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>需要相册权限以导入截图进行裁剪</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

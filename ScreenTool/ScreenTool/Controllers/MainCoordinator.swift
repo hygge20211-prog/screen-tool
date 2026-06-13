@@ -1,85 +1,75 @@
 import UIKit
+import PhotosUI
 
-/// Manages the floating button window and coordinates the screenshot capture flow.
-class MainCoordinator {
+/// Floating button → pick image from Photos → lasso crop → save in app
+class MainCoordinator: NSObject {
 
     private var floatingWindow: FloatingButtonWindow?
     private weak var mainWindow: UIWindow?
+    private var pendingImage: UIImage?
 
     func start(in scene: UIWindowScene, mainWindow: UIWindow) {
         self.mainWindow = mainWindow
         let fw = FloatingButtonWindow(windowScene: scene)
         fw.isHidden = false
         fw.floatingButton.onTap = { [weak self] in
-            self?.startCapture()
+            self?.presentPhotoPicker()
         }
         self.floatingWindow = fw
     }
 
-    private func startCapture() {
-        guard let mainWindow = mainWindow else { return }
+    // MARK: - Step 1: Pick from Photos
 
-        // 1. Hide the floating button briefly so it's not in the screenshot
-        floatingWindow?.floatingButton.alpha = 0
+    func importFromPhotos(presentingVC: UIViewController? = nil) {
+        presentingViewController = presentingVC
+        presentPhotoPicker()
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self else { return }
+    private weak var presentingViewController: UIViewController?
 
-            // 2. Capture the full screen
-            let screenImage = ScreenCaptureManager.shared.captureScreen(in: mainWindow)
+    private func presentPhotoPicker() {
+        var config = PHPickerConfiguration(photoLibrary: .shared())
+        config.selectionLimit = 1
+        config.filter = .images
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = self
+        presentModal(picker)
+    }
 
-            // 3. Show floating button again
-            UIView.animate(withDuration: 0.2) {
-                self.floatingWindow?.floatingButton.alpha = 1
-            }
+    // MARK: - Step 2: Lasso overlay
 
-            guard let screenImage = screenImage else { return }
+    private func presentLasso(with image: UIImage) {
+        pendingImage = image
 
-            // 4. Present lasso overlay
-            let lassoVC = LassoOverlayViewController()
-            lassoVC.modalPresentationStyle = .overFullScreen
-            lassoVC.modalTransitionStyle = .crossDissolve
+        let lassoVC = LassoOverlayViewController()
+        lassoVC.modalPresentationStyle = .overFullScreen
+        lassoVC.modalTransitionStyle = .crossDissolve
+        lassoVC.delegate = self
 
-            // Set a background snapshot so user can see what they're selecting
-            let bg = UIImageView(image: screenImage)
-            bg.frame = lassoVC.view.bounds
-            bg.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            bg.contentMode = .scaleAspectFill
-            lassoVC.view.insertSubview(bg, at: 0)
+        // Show the imported image as background so user knows what they're selecting
+        let bg = UIImageView(image: image)
+        bg.frame = UIScreen.main.bounds
+        bg.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        bg.contentMode = .scaleAspectFit
+        bg.backgroundColor = .black
+        lassoVC.view.insertSubview(bg, at: 0)
 
-            lassoVC.delegate = self
+        presentModal(lassoVC)
+    }
 
-            // Present from the topmost view controller
-            var topVC = mainWindow.rootViewController
-            while let presented = topVC?.presentedViewController { topVC = presented }
-            topVC?.present(lassoVC, animated: true)
+    // MARK: - Helpers
 
-            // Store for later
-            self.pendingScreenImage = screenImage
+    private func presentModal(_ vc: UIViewController) {
+        if let explicit = presentingViewController {
+            var top: UIViewController? = explicit
+            while let presented = top?.presentedViewController { top = presented }
+            top?.present(vc, animated: true)
+            return
         }
-    }
-
-    private var pendingScreenImage: UIImage?
-}
-
-extension MainCoordinator: LassoOverlayDelegate {
-
-    func lassoDidConfirm(path: UIBezierPath, in size: CGSize) {
-        guard let image = pendingScreenImage else { return }
-        let cropped = ScreenCaptureManager.shared.crop(image: image, to: path, in: size)
-        guard let cropped = cropped else { return }
-
-        guard let fileName = FileStorageManager.shared.save(image: cropped) else { return }
-        let screenshot = Screenshot(fileName: fileName, createdAt: Date(), folderId: nil)
-        DataStore.shared.addScreenshot(screenshot)
-        NotificationCenter.default.post(name: .init("DataStoreUpdated"), object: nil)
-
-        pendingScreenImage = nil
-        showSavedFeedback()
-    }
-
-    func lassoDidCancel() {
-        pendingScreenImage = nil
+        guard let mainWindow = mainWindow else { return }
+        var top = mainWindow.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        top?.present(vc, animated: true)
     }
 
     private func showSavedFeedback() {
@@ -88,7 +78,7 @@ extension MainCoordinator: LassoOverlayDelegate {
         label.text = "截图已保存"
         label.font = .systemFont(ofSize: 15, weight: .semibold)
         label.textColor = .white
-        label.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.72)
         label.textAlignment = .center
         label.layer.cornerRadius = 12
         label.clipsToBounds = true
@@ -100,10 +90,64 @@ extension MainCoordinator: LassoOverlayDelegate {
             label.widthAnchor.constraint(equalToConstant: 140),
             label.heightAnchor.constraint(equalToConstant: 40)
         ])
-        UIView.animate(withDuration: 0.3, delay: 1.2, options: []) {
-            label.alpha = 0
-        } completion: { _ in
+        UIView.animate(withDuration: 0.3, delay: 1.4, options: []) { label.alpha = 0 } completion: { _ in
             label.removeFromSuperview()
         }
+    }
+}
+
+// MARK: - PHPickerViewControllerDelegate
+
+extension MainCoordinator: PHPickerViewControllerDelegate {
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true)
+        guard let provider = results.first?.itemProvider,
+              provider.canLoadObject(ofClass: UIImage.self) else { return }
+        provider.loadObject(ofClass: UIImage.self) { [weak self] object, _ in
+            DispatchQueue.main.async {
+                guard let image = object as? UIImage else { return }
+                self?.presentLasso(with: image)
+            }
+        }
+    }
+}
+
+// MARK: - LassoOverlayDelegate
+
+extension MainCoordinator: LassoOverlayDelegate {
+    func lassoDidConfirm(path: UIBezierPath, in size: CGSize) {
+        guard let image = pendingImage else { return }
+
+        // Adjust canvas size to account for aspectFit letterboxing
+        let imgRatio = image.size.width / image.size.height
+        let canvasRatio = size.width / size.height
+        let effectiveCanvas: CGSize
+        if imgRatio > canvasRatio {
+            // letterbox top/bottom
+            let h = size.width / imgRatio
+            let offsetY = (size.height - h) / 2
+            effectiveCanvas = CGSize(width: size.width, height: h)
+            path.apply(CGAffineTransform(translationX: 0, y: -offsetY))
+        } else {
+            // pillarbox left/right
+            let w = size.height * imgRatio
+            let offsetX = (size.width - w) / 2
+            effectiveCanvas = CGSize(width: w, height: size.height)
+            path.apply(CGAffineTransform(translationX: -offsetX, y: 0))
+        }
+
+        let cropped = ScreenCaptureManager.shared.crop(image: image, to: path, in: effectiveCanvas)
+        pendingImage = nil
+        guard let cropped = cropped,
+              let fileName = FileStorageManager.shared.save(image: cropped) else { return }
+
+        let screenshot = Screenshot(fileName: fileName, createdAt: Date(), folderId: nil)
+        DataStore.shared.addScreenshot(screenshot)
+        NotificationCenter.default.post(name: .init("DataStoreUpdated"), object: nil)
+        showSavedFeedback()
+    }
+
+    func lassoDidCancel() {
+        pendingImage = nil
     }
 }
