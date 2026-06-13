@@ -10,11 +10,11 @@ protocol LassoOverlayDelegate: AnyObject {
 class LassoOverlayPanel: NSPanel {
 
     weak var lassoDelegate: LassoOverlayDelegate?
-    private let screen: NSScreen
+    private let targetScreen: NSScreen
     private let content: LassoContentView
 
     init(screen: NSScreen, backgroundCGImage: CGImage) {
-        self.screen = screen
+        self.targetScreen = screen
         self.content = LassoContentView(backgroundCGImage: backgroundCGImage, scale: screen.backingScaleFactor)
 
         super.init(
@@ -37,7 +37,7 @@ class LassoOverlayPanel: NSPanel {
             self.lassoDelegate?.lassoDidConfirm(
                 path: path,
                 canvasSize: self.content.bounds.size,
-                scale: screen.backingScaleFactor
+                scale: self.targetScreen.backingScaleFactor
             )
         }
         content.onCancel = { [weak self] in
