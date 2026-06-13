@@ -1,0 +1,199 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B101 /* main.swift in Sources */                     = {isa = PBXBuildFile; fileRef = B001; };
+		B102 /* AppDelegate.swift in Sources */              = {isa = PBXBuildFile; fileRef = B002; };
+		B103 /* CaptureCoordinator.swift in Sources */       = {isa = PBXBuildFile; fileRef = B003; };
+		B104 /* LassoOverlayWindow.swift in Sources */       = {isa = PBXBuildFile; fileRef = B004; };
+		B105 /* GalleryView.swift in Sources */              = {isa = PBXBuildFile; fileRef = B005; };
+		B106 /* Models.swift in Sources */                   = {isa = PBXBuildFile; fileRef = B006; };
+		B107 /* DataStore.swift in Sources */                = {isa = PBXBuildFile; fileRef = B007; };
+		B108 /* FileStorageManager.swift in Sources */       = {isa = PBXBuildFile; fileRef = B008; };
+		B113 /* Assets.xcassets in Resources */              = {isa = PBXBuildFile; fileRef = B010; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B000 /* ScreenToolMac.app */                = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScreenToolMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B001 /* main.swift */                       = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		B002 /* AppDelegate.swift */                = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		B003 /* CaptureCoordinator.swift */         = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureCoordinator.swift; sourceTree = "<group>"; };
+		B004 /* LassoOverlayWindow.swift */         = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LassoOverlayWindow.swift; sourceTree = "<group>"; };
+		B005 /* GalleryView.swift */                = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
+		B006 /* Models.swift */                     = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		B007 /* DataStore.swift */                  = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataStore.swift; sourceTree = "<group>"; };
+		B008 /* FileStorageManager.swift */         = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStorageManager.swift; sourceTree = "<group>"; };
+		B010 /* Assets.xcassets */                  = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B011 /* Info.plist */                       = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B0FB /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		B0F /* = */ = {
+			isa = PBXGroup;
+			children = (B0F0, B0E0);
+			sourceTree = "<group>";
+		};
+		B0E0 /* Products */ = {
+			isa = PBXGroup;
+			children = (B000);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B0F0 /* ScreenToolMac */ = {
+			isa = PBXGroup;
+			children = (B001, B002, B003, B004, B005, B006, B007, B008, B010, B011);
+			path = ScreenToolMac;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B0T0 /* ScreenToolMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B0C0;
+			buildPhases = (B0FA, B0FB, B0FC);
+			buildRules = ();
+			dependencies = ();
+			name = ScreenToolMac;
+			productName = ScreenToolMac;
+			productReference = B000;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B0P0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = { B0T0 = { CreatedOnToolsVersion = 15.4; }; };
+			};
+			buildConfigurationList = B0C1;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (zh_CN, Base);
+			mainGroup = B0F;
+			productRefGroup = B0E0;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (B0T0);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B0FC /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B113); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B0FA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B101, B102, B103, B104, B105, B106, B107, B108);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		B0D0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)");
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		B0D1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		B0D2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ScreenToolMac/ScreenToolMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ScreenToolMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks");
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.screentoolmac.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		B0D3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ScreenToolMac/ScreenToolMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ScreenToolMac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks");
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.screentoolmac.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B0C0 = {isa = XCConfigurationList; buildConfigurations = (B0D2, B0D3); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		B0C1 = {isa = XCConfigurationList; buildConfigurations = (B0D0, B0D1); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+	};
+	rootObject = B0P0;
+}
