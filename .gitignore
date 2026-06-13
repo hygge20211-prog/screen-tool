@@ -1,0 +1,8 @@
+# macOS
+.DS_Store
+
+# Xcode build output / user state
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/

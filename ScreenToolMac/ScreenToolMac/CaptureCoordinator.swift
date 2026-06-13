@@ -1,10 +1,17 @@
 import AppKit
 
+/// How the user draws the selection region.
+enum CaptureMode {
+    case freeform    // click vertices and/or drag freehand (polygon + lasso) — the default
+    case rectangle   // drag a rectangle
+}
+
 class CaptureCoordinator: NSObject {
 
     private var overlayPanel: LassoOverlayPanel?
     private var capturedCGImage: CGImage?
     private var captureScale: CGFloat = 1.0
+    private var captureMode: CaptureMode = .freeform
 
     /// Called when the capture flow ends (confirmed, cancelled, or permission denied),
     /// so the caller can restore any window it hid before capturing.
@@ -12,7 +19,8 @@ class CaptureCoordinator: NSObject {
 
     // MARK: - Start
 
-    func startCapture() {
+    func startCapture(mode: CaptureMode = .freeform) {
+        captureMode = mode
         guard let screen = NSScreen.main else { return }
 
         // CGDisplayCreateImage does NOT fail when screen-recording permission is
@@ -43,7 +51,7 @@ class CaptureCoordinator: NSObject {
 
     private func showOverlay(screen: NSScreen) {
         guard let cgImg = capturedCGImage else { return }
-        let panel = LassoOverlayPanel(screen: screen, backgroundCGImage: cgImg)
+        let panel = LassoOverlayPanel(screen: screen, backgroundCGImage: cgImg, mode: captureMode)
         panel.lassoDelegate = self
         // Bring our app forward so the overlay receives mouse/keyboard events even
         // when capture was triggered while another app (e.g. the browser) was active.
@@ -78,25 +86,44 @@ class CaptureCoordinator: NSObject {
     // MARK: - Crop helper
 
     private func crop(cgImage: CGImage, path: NSBezierPath, scale: CGFloat) -> NSImage? {
-        let widthPts  = CGFloat(cgImage.width)  / scale
-        let heightPts = CGFloat(cgImage.height) / scale
-        let nsSource  = NSImage(cgImage: cgImage, size: NSSize(width: widthPts, height: heightPts))
-
         let pb = path.bounds
         guard pb.width > 1, pb.height > 1 else { return nil }
 
-        let result = NSImage(size: pb.size)
-        result.lockFocusFlipped(true) // y-down, matches our flipped LassoView coords
+        // Render at PIXEL resolution. The path is in points; the captured image is
+        // full Retina pixels. The old code drew into a 1x NSImage focus, throwing
+        // away half the resolution on Retina (blurry result) — render to a
+        // pixel-sized context instead so detail is preserved.
+        let pxW = Int((pb.width  * scale).rounded())
+        let pxH = Int((pb.height * scale).rounded())
+        guard pxW > 0, pxH > 0,
+              let ctx = CGContext(data: nil, width: pxW, height: pxH,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .high
 
-        // Translate so that path.bounds.origin → (0,0)
-        let adjusted = path.copy() as! NSBezierPath
-        adjusted.transform(using: AffineTransform(translationByX: -pb.origin.x, byY: -pb.origin.y))
-        adjusted.setClip()
+        // Map flipped screen-point coords (y-down, origin = screen top-left) into the
+        // pixel context (y-up). After this the CTM speaks in points with y growing down.
+        ctx.translateBy(x: 0, y: CGFloat(pxH))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.translateBy(x: -pb.minX, y: -pb.minY)
 
-        nsSource.draw(in: NSRect(x: -pb.origin.x, y: -pb.origin.y, width: widthPts, height: heightPts))
+        // Clip to the lasso / polygon selection.
+        ctx.addPath(path.cgPath)
+        ctx.clip()
 
-        result.unlockFocus()
-        return result
+        // Draw the full-resolution screenshot, correctly oriented, via NSImage.
+        let fullPtW = CGFloat(cgImage.width)  / scale
+        let fullPtH = CGFloat(cgImage.height) / scale
+        let nsSource = NSImage(cgImage: cgImage, size: NSSize(width: fullPtW, height: fullPtH))
+        let prev = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        nsSource.draw(in: NSRect(x: 0, y: 0, width: fullPtW, height: fullPtH))
+        NSGraphicsContext.current = prev
+
+        guard let outCG = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: outCG, size: pb.size)
     }
 }
 

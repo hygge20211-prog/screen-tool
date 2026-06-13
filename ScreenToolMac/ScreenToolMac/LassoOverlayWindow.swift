@@ -13,9 +13,11 @@ class LassoOverlayPanel: NSPanel {
     private let targetScreen: NSScreen
     private let content: LassoContentView
 
-    init(screen: NSScreen, backgroundCGImage: CGImage) {
+    init(screen: NSScreen, backgroundCGImage: CGImage, mode: CaptureMode) {
         self.targetScreen = screen
-        self.content = LassoContentView(backgroundCGImage: backgroundCGImage, scale: screen.backingScaleFactor)
+        self.content = LassoContentView(backgroundCGImage: backgroundCGImage,
+                                        scale: screen.backingScaleFactor,
+                                        mode: mode)
 
         super.init(
             contentRect: screen.frame,
@@ -58,8 +60,13 @@ class LassoContentView: NSView {
 
     private let backgroundCGImage: CGImage
     private let scale: CGFloat
-    private var currentPath: NSBezierPath?   // while dragging
-    private var finishedPath: NSBezierPath?  // after mouse up
+    private var mode: CaptureMode
+    private var points: [NSPoint] = []   // polygon vertices / freehand-lasso trail
+    private var rectStart: NSPoint?      // rectangle mode: drag anchor
+    private var rectEnd: NSPoint?        // rectangle mode: opposite corner
+    private var cursor: NSPoint?         // live mouse position, for the rubber-band edge
+    private var isDragging = false       // true while a freehand drag stroke is in progress
+    private let snapRadius: CGFloat = 14  // cursor within this of the start point → snap-close
 
     private lazy var backgroundNSImage: NSImage = {
         NSImage(cgImage: backgroundCGImage, size: NSSize(
@@ -69,16 +76,27 @@ class LassoContentView: NSView {
     }()
 
     // Toolbar
+    private var modeSelector: NSSegmentedControl!
     private var confirmBtn: NSButton!
     private var clearBtn: NSButton!
     private var cancelBtn: NSButton!
     private var hintLabel: NSTextField!
 
-    init(backgroundCGImage: CGImage, scale: CGFloat) {
+    private let modeOrder: [CaptureMode] = [.freeform, .rectangle]
+
+    init(backgroundCGImage: CGImage, scale: CGFloat, mode: CaptureMode) {
         self.backgroundCGImage = backgroundCGImage
         self.scale = scale
+        self.mode = mode
         super.init(frame: .zero)
         buildToolbar()
+    }
+
+    private var hintText: String {
+        switch mode {
+        case .freeform:  return "单击加顶点 / 按住拖动自由勾勒（可混用）→ 双击 · 回到起点 · 「确认截图」闭合　·　⌫ 撤销　Esc 取消"
+        case .rectangle: return "按住拖动画出矩形 → 点「确认截图」截取　·　Esc 取消"
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -96,7 +114,15 @@ class LassoContentView: NSView {
         confirmBtn.isEnabled = false
         clearBtn.isEnabled = false
 
-        hintLabel = NSTextField(labelWithString: "拖动鼠标画出选区，释放后点「确认」")
+        // Shape picker lives inside the capture overlay so the user switches
+        // rectangle / polygon / lasso while capturing.
+        modeSelector = NSSegmentedControl(labels: ["多边形 / 套索", "矩形"],
+                                          trackingMode: .selectOne,
+                                          target: self, action: #selector(modeChanged))
+        modeSelector.selectedSegment = modeOrder.firstIndex(of: mode) ?? 0
+        modeSelector.controlSize = .large
+
+        hintLabel = NSTextField(labelWithString: hintText)
         hintLabel.font = .systemFont(ofSize: 14, weight: .medium)
         hintLabel.textColor = .white
         hintLabel.alignment = .center
@@ -104,15 +130,18 @@ class LassoContentView: NSView {
         hintLabel.drawsBackground = false
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let controls: [NSView] = [cancelBtn, clearBtn, confirmBtn, hintLabel]
+        let controls: [NSView] = [modeSelector, cancelBtn, clearBtn, confirmBtn, hintLabel]
         for control in controls {
             control.translatesAutoresizingMaskIntoConstraints = false
             addSubview(control)
         }
 
         NSLayoutConstraint.activate([
+            modeSelector.centerXAnchor.constraint(equalTo: centerXAnchor),
+            modeSelector.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+
             hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            hintLabel.topAnchor.constraint(equalTo: topAnchor, constant: 24),
+            hintLabel.topAnchor.constraint(equalTo: modeSelector.bottomAnchor, constant: 12),
 
             cancelBtn.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -36),
             cancelBtn.centerXAnchor.constraint(equalTo: centerXAnchor, constant: -150),
@@ -132,36 +161,116 @@ class LassoContentView: NSView {
         return b
     }
 
-    // MARK: - Mouse Tracking
+    @objc private func modeChanged() {
+        let idx = modeSelector.selectedSegment
+        guard modeOrder.indices.contains(idx) else { return }
+        mode = modeOrder[idx]
+        clear()                        // discard the in-progress selection
+        hintLabel.stringValue = hintText
+    }
+
+    // MARK: - Mouse Tracking (per mode)
 
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
-        currentPath = NSBezierPath()
-        currentPath?.move(to: pt)
-        finishedPath = nil
+        cursor = pt
+        switch mode {
+        case .rectangle:
+            rectStart = pt; rectEnd = pt
+        case .freeform:
+            if event.clickCount >= 2 { confirm(); return }   // double-click finishes
+            if nearStart(pt) { confirm(); return }            // click the start to close
+            isDragging = false
+            points.append(pt)                                 // a click = one vertex
+        }
         updateButtons()
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
-        currentPath?.line(to: pt)
-        needsDisplay = true
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        currentPath?.close()
-        finishedPath = currentPath
-        currentPath = nil
+        cursor = pt
+        switch mode {
+        case .rectangle: rectEnd = pt
+        case .freeform:  isDragging = true; points.append(pt)  // trace a freehand trail
+        }
         updateButtons()
         needsDisplay = true
     }
 
+    override func mouseUp(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        switch mode {
+        case .rectangle:
+            rectEnd = pt
+        case .freeform:
+            // A freehand stroke released near the start auto-closes the loop.
+            if isDragging, let last = points.last, nearStart(last) { confirm() }
+        }
+        isDragging = false
+        updateButtons()
+        needsDisplay = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        cursor = convert(event.locationInWindow, from: nil)
+        if !points.isEmpty { needsDisplay = true }
+    }
+
+    /// True when `pt` is within the snap radius of the start vertex and a closeable loop exists.
+    private func nearStart(_ pt: NSPoint) -> Bool {
+        guard points.count >= 3, let first = points.first else { return false }
+        return hypot(pt.x - first.x, pt.y - first.y) <= snapRadius
+    }
+
+    // Ensure mouseMoved is delivered across the whole overlay for the rubber-band edge.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
     private func updateButtons() {
-        let hasPath = finishedPath != nil
-        confirmBtn.isEnabled = hasPath
-        clearBtn.isEnabled = hasPath
-        hintLabel.isHidden = hasPath
+        switch mode {
+        case .rectangle:
+            confirmBtn.isEnabled = currentRect != nil
+            clearBtn.isEnabled = rectStart != nil
+        case .freeform:
+            confirmBtn.isEnabled = points.count >= 3   // need at least a triangle
+            clearBtn.isEnabled = !points.isEmpty
+        }
+    }
+
+    /// The rectangle (in view points) for rectangle mode, or nil if too small.
+    private var currentRect: NSRect? {
+        guard let a = rectStart, let b = rectEnd else { return nil }
+        let r = NSRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                       width: abs(a.x - b.x), height: abs(a.y - b.y))
+        return (r.width > 1 && r.height > 1) ? r : nil
+    }
+
+    /// The selection path for the current mode (closed, ready to crop).
+    private func selectionPath() -> NSBezierPath? {
+        switch mode {
+        case .rectangle:
+            guard let r = currentRect else { return nil }
+            return NSBezierPath(rect: r)
+        case .freeform:
+            guard points.count >= 3 else { return nil }
+            return polygonPath(closed: true)
+        }
+    }
+
+    /// Closed polygon through all committed vertices.
+    private func polygonPath(closed: Bool) -> NSBezierPath {
+        let path = NSBezierPath()
+        guard let first = points.first else { return path }
+        path.move(to: first)
+        for p in points.dropFirst() { path.line(to: p) }
+        if closed { path.close() }
+        return path
     }
 
     // MARK: - Drawing
@@ -174,34 +283,91 @@ class LassoContentView: NSView {
         NSColor.black.withAlphaComponent(0.45).setFill()
         NSBezierPath(rect: bounds).fill()
 
-        // 3. Lasso selection – clear the veil inside and draw border
-        let displayPath = currentPath ?? finishedPath
-        if let p = displayPath {
-            NSGraphicsContext.saveGraphicsState()
-            p.setClip()
-            backgroundNSImage.draw(in: bounds)
-            NSGraphicsContext.restoreGraphicsState()
-
-            NSColor.white.setStroke()
-            p.lineWidth = 2
-            let dashPattern: [CGFloat] = [8, 4]
-            p.setLineDash(dashPattern, count: 2, phase: 0)
-            p.stroke()
-
-            // Highlight corner dot at start
-            if let first = firstPoint(of: p) {
-                let dot = NSBezierPath(ovalIn: NSRect(x: first.x - 4, y: first.y - 4, width: 8, height: 8))
-                NSColor.white.setFill()
-                dot.fill()
-            }
+        if mode == .rectangle {
+            drawRectangleSelection()
+        } else {
+            drawPathSelection()
         }
     }
 
-    private func firstPoint(of path: NSBezierPath) -> NSPoint? {
-        guard path.elementCount > 0 else { return nil }
-        var pts = [NSPoint](repeating: .zero, count: 3)
-        path.element(at: 0, associatedPoints: &pts)
-        return pts[0]
+    private func drawRectangleSelection() {
+        guard let r = currentRect else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: r).setClip()
+        backgroundNSImage.draw(in: bounds)
+        NSGraphicsContext.restoreGraphicsState()
+
+        let border = NSBezierPath(rect: r)
+        border.lineWidth = 2
+        var dash: [CGFloat] = [8, 4]
+        border.setLineDash(&dash, count: 2, phase: 0)
+        NSColor.white.setStroke()
+        border.stroke()
+    }
+
+    private func drawPathSelection() {
+        guard !points.isEmpty else { return }
+
+        // Un-dim the (provisionally closed) selection so it previews while building.
+        if points.count >= 2 {
+            NSGraphicsContext.saveGraphicsState()
+            polygonPath(closed: true).setClip()
+            backgroundNSImage.draw(in: bounds)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        // Committed edges (solid white)
+        let edges = polygonPath(closed: false)
+        edges.lineWidth = 2
+        NSColor.white.setStroke()
+        edges.stroke()
+
+        // Closing edge (last → first), dashed
+        if points.count >= 3, let first = points.first, let last = points.last {
+            let closing = NSBezierPath()
+            closing.move(to: last)
+            closing.line(to: first)
+            closing.lineWidth = 1.5
+            var dash: [CGFloat] = [6, 4]
+            closing.setLineDash(&dash, count: 2, phase: 0)
+            NSColor.white.withAlphaComponent(0.5).setStroke()
+            closing.stroke()
+        }
+
+        // Rubber band, snap halo and vertex handles for the freeform mode.
+        guard mode == .freeform else { return }
+
+        if let c = cursor, let last = points.last {
+            let rubber = NSBezierPath()
+            rubber.move(to: last)
+            rubber.line(to: c)
+            rubber.lineWidth = 1.5
+            var dash: [CGFloat] = [8, 4]
+            rubber.setLineDash(&dash, count: 2, phase: 0)
+            NSColor.white.withAlphaComponent(0.8).setStroke()
+            rubber.stroke()
+        }
+
+        let snapping = cursor.map(nearStart) ?? false
+        if snapping, let first = points.first {
+            let ring = NSBezierPath(ovalIn: NSRect(x: first.x - snapRadius, y: first.y - snapRadius,
+                                                   width: snapRadius * 2, height: snapRadius * 2))
+            NSColor.systemBlue.withAlphaComponent(0.25).setFill()
+            ring.fill()
+            ring.lineWidth = 1.5
+            NSColor.systemBlue.setStroke()
+            ring.stroke()
+        }
+
+        for (i, p) in points.enumerated() {
+            let r: CGFloat = (i == 0) ? (snapping ? 7 : 5) : 3.5
+            let dot = NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2))
+            (i == 0 ? NSColor.systemBlue : NSColor.white).setFill()
+            dot.fill()
+            dot.lineWidth = 1
+            NSColor.white.setStroke()
+            dot.stroke()
+        }
     }
 
     // MARK: - Keyboard
@@ -210,22 +376,32 @@ class LassoContentView: NSView {
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
-        case 53: cancel()         // Escape
-        case 36, 76: confirm()    // Return / Enter
+        case 53: cancel()              // Escape
+        case 36, 76: confirm()         // Return / Enter
+        case 51: removeLastPoint()     // Delete / Backspace
         default: super.keyDown(with: event)
         }
+    }
+
+    private func removeLastPoint() {
+        guard !points.isEmpty else { return }
+        points.removeLast()
+        updateButtons()
+        needsDisplay = true
     }
 
     // MARK: - Actions
 
     @objc private func confirm() {
-        guard let path = finishedPath, confirmBtn.isEnabled else { return }
+        guard let path = selectionPath() else { return }
         onConfirm?(path)
     }
 
     @objc private func clear() {
-        finishedPath = nil
-        currentPath = nil
+        points.removeAll()
+        rectStart = nil
+        rectEnd = nil
+        cursor = nil
         updateButtons()
         needsDisplay = true
     }

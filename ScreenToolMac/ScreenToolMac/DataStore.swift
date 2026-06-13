@@ -36,6 +36,18 @@ class DataStore: ObservableObject {
         save()
     }
 
+    func renameFolder(_ f: Folder, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let i = folders.firstIndex(where: { $0.id == f.id }) else { return }
+        folders[i].name = trimmed
+        save()
+    }
+
+    func moveFolders(from source: IndexSet, to destination: Int) {
+        folders.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     func move(_ s: Screenshot, to folderId: UUID?) {
         if let i = screenshots.firstIndex(where: { $0.id == s.id }) {
             screenshots[i].folderId = folderId
