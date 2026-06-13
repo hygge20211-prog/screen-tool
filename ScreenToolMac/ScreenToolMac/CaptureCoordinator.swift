@@ -14,6 +14,17 @@ class CaptureCoordinator: NSObject {
 
     func startCapture() {
         guard let screen = NSScreen.main else { return }
+
+        // CGDisplayCreateImage does NOT fail when screen-recording permission is
+        // missing — it silently returns a desktop-only image (no app windows).
+        // So we must gate on the real permission state up front.
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess() // adds us to the list / shows the system prompt
+            showPermissionAlert()
+            onCaptureFinished?()
+            return
+        }
+
         let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! CGDirectDisplayID
 
         guard let img = CGDisplayCreateImage(displayID) else {
@@ -34,6 +45,9 @@ class CaptureCoordinator: NSObject {
         guard let cgImg = capturedCGImage else { return }
         let panel = LassoOverlayPanel(screen: screen, backgroundCGImage: cgImg)
         panel.lassoDelegate = self
+        // Bring our app forward so the overlay receives mouse/keyboard events even
+        // when capture was triggered while another app (e.g. the browser) was active.
+        NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         overlayPanel = panel
     }
@@ -42,8 +56,16 @@ class CaptureCoordinator: NSObject {
 
     private func showPermissionAlert() {
         let alert = NSAlert()
-        alert.messageText = "需要屏幕录制权限"
-        alert.informativeText = "请前往「系统设置 → 隐私与安全性 → 屏幕录制」，开启本 App 的权限后重试。"
+        alert.messageText = "需要「屏幕录制」权限才能截到窗口内容"
+        alert.informativeText = """
+        否则只会截到空桌面。请按以下步骤：
+
+        1. 打开「系统设置 → 隐私与安全性 → 屏幕录制」
+        2. 打开本 App（截图工具）的开关
+        3. 关键：完全退出本 App（⌘Q）再重新打开，权限才会生效
+
+        提示：用 Xcode 反复运行会让权限「认旧不认新」。建议把编译出的 .app 拖到「应用程序」文件夹，从那里启动，权限会更稳定。
+        """
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "取消")
         if alert.runModal() == .alertFirstButtonReturn {

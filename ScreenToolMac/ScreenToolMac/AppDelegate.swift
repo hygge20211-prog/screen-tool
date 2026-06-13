@@ -1,19 +1,27 @@
 import Cocoa
 import SwiftUI
+import Carbon.HIToolbox
 
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
+    private let statusMenu = NSMenu()
     let coordinator = CaptureCoordinator()
     private var galleryWindow: NSWindow?
+    private var hotKey: GlobalHotKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
-        // Trigger macOS Screen Recording permission prompt on first launch
-        _ = CGDisplayCreateImage(CGMainDisplayID())
         // Restore the gallery window when capture finishes/cancels
         coordinator.onCaptureFinished = { [weak self] in
             self?.galleryWindow?.makeKeyAndOrderFront(nil)
+        }
+        // Global hotkey ⌃⌘5 — works from any app (browser etc.), no extra permission.
+        // kVK_ANSI_5 = 0x17; Carbon mods cmdKey | controlKey.
+        hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_5),
+                              modifiers: UInt32(cmdKey | controlKey))
+        hotKey?.onFire = { [weak self] in
+            DispatchQueue.main.async { self?.startCaptureHidingWindow() }
         }
         // Show the main window right away so the app is easy to find
         openGallery()
@@ -43,26 +51,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let img = NSImage(systemSymbolName: "camera.viewfinder", accessibilityDescription: "截图工具")
             img?.isTemplate = true
             btn.image = img
+            btn.toolTip = "左键单击：截图　右键单击：菜单"
+            // Left-click = capture immediately, right-click = show menu
+            btn.target = self
+            btn.action = #selector(statusBarClicked)
+            btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
-        let menu = NSMenu()
-
-        let captureItem = NSMenuItem(title: "截取屏幕区域", action: #selector(startCapture), keyEquivalent: "5")
-        captureItem.keyEquivalentModifierMask = [.command, .shift]
+        // Built once, attached only on right-click (see statusBarClicked)
+        let captureItem = NSMenuItem(title: "截取屏幕区域  (⌃⌘5)", action: #selector(startCapture), keyEquivalent: "")
         captureItem.target = self
-        menu.addItem(captureItem)
+        statusMenu.addItem(captureItem)
 
-        menu.addItem(.separator())
+        statusMenu.addItem(.separator())
 
         let galleryItem = NSMenuItem(title: "打开截图库…", action: #selector(openGallery), keyEquivalent: "g")
         galleryItem.keyEquivalentModifierMask = [.command, .shift]
         galleryItem.target = self
-        menu.addItem(galleryItem)
+        statusMenu.addItem(galleryItem)
 
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
 
-        statusItem.menu = menu
+    @objc private func statusBarClicked() {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+        if isRightClick {
+            statusItem.menu = statusMenu            // temporarily attach
+            statusItem.button?.performClick(nil)    // pop it up
+            statusItem.menu = nil                   // detach so next left-click captures
+        } else {
+            startCaptureHidingWindow()
+        }
     }
 
     @objc private func startCapture() {

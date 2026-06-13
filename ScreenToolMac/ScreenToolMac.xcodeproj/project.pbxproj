@@ -15,6 +15,7 @@
 		B106 /* Models.swift in Sources */                   = {isa = PBXBuildFile; fileRef = B006; };
 		B107 /* DataStore.swift in Sources */                = {isa = PBXBuildFile; fileRef = B007; };
 		B108 /* FileStorageManager.swift in Sources */       = {isa = PBXBuildFile; fileRef = B008; };
+		B109 /* GlobalHotKey.swift in Sources */             = {isa = PBXBuildFile; fileRef = B009; };
 		B113 /* Assets.xcassets in Resources */              = {isa = PBXBuildFile; fileRef = B010; };
 /* End PBXBuildFile section */
 
@@ -28,6 +29,7 @@
 		B006 /* Models.swift */                     = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		B007 /* DataStore.swift */                  = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataStore.swift; sourceTree = "<group>"; };
 		B008 /* FileStorageManager.swift */         = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStorageManager.swift; sourceTree = "<group>"; };
+		B009 /* GlobalHotKey.swift */               = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKey.swift; sourceTree = "<group>"; };
 		B010 /* Assets.xcassets */                  = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B011 /* Info.plist */                       = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -50,7 +52,7 @@
 		};
 		B0F0 /* ScreenToolMac */ = {
 			isa = PBXGroup;
-			children = (B001, B002, B003, B004, B005, B006, B007, B008, B010, B011);
+			children = (B001, B002, B003, B004, B005, B006, B007, B008, B009, B010, B011);
 			path = ScreenToolMac;
 			sourceTree = "<group>";
 		};
@@ -100,7 +102,7 @@
 		B0FA /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (B101, B102, B103, B104, B105, B106, B107, B108);
+			files = (B101, B102, B103, B104, B105, B106, B107, B108, B109);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

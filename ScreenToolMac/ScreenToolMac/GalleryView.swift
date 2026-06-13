@@ -93,8 +93,7 @@ struct GalleryView: View {
             Button(action: onCapture) {
                 Label("截图", systemImage: "camera.viewfinder")
             }
-            .keyboardShortcut("5", modifiers: [.command, .shift])
-            .help("框选屏幕上的任意区域进行截图")
+            .help("框选屏幕上的任意区域进行截图（全局快捷键 ⌃⌘5）")
 
             Text(isAllSelected ? "全部截图" : (store.folders.first(where: { $0.id == selectedFolderId })?.name ?? ""))
                 .font(.headline)
@@ -183,7 +182,7 @@ struct GalleryView: View {
             Text("还没有截图")
                 .font(.title2)
                 .foregroundColor(.secondary)
-            Text("点击左上角「截图」按钮，或按 ⌘⇧5 开始截图")
+            Text("点击左上角「截图」按钮，或按全局快捷键 ⌃⌘5 开始截图")
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
