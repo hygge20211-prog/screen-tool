@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
     let coordinator = CaptureCoordinator()
+    private let cropController = ImageCropController()
     private var galleryWindow: NSWindow?
     private var hotKey: GlobalHotKey?
     private var floatingPanel: NSPanel?          // always-on-top quick-capture button
@@ -54,6 +55,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.coordinator.startCapture(mode: mode)
         }
+    }
+
+    // Re-crop an existing image (lasso / polygon) and overwrite it in place.
+    func recrop(_ ss: Screenshot) {
+        cropController.begin(fileName: ss.fileName) { }
     }
 
     // MARK: - Floating quick-capture button (always on top)
@@ -214,7 +220,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openGallery() {
         if galleryWindow == nil {
-            let view = GalleryView(onCapture: { [weak self] mode in self?.startCaptureHidingWindow(mode: mode) })
+            let view = GalleryView(onCapture: { [weak self] mode in self?.startCaptureHidingWindow(mode: mode) },
+                                   onRecrop: { [weak self] ss in self?.recrop(ss) })
                 .environmentObject(DataStore.shared)
             let hosting = NSHostingController(rootView: view)
             let win = NSWindow(contentViewController: hosting)

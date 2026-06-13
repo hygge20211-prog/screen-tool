@@ -61,6 +61,10 @@ class LassoContentView: NSView {
     private let backgroundCGImage: CGImage
     private let scale: CGFloat
     private var mode: CaptureMode
+    /// Where the background image is drawn (nil = fill the whole view, used for
+    /// screen capture). For re-cropping an existing image it's an aspect-fit rect.
+    var imageRect: NSRect?
+    private var bgRect: NSRect { imageRect ?? bounds }
     private var points: [NSPoint] = []   // polygon vertices / freehand-lasso trail
     private var rectStart: NSPoint?      // rectangle mode: drag anchor
     private var rectEnd: NSPoint?        // rectangle mode: opposite corner
@@ -277,7 +281,7 @@ class LassoContentView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         // 1. Background screenshot
-        backgroundNSImage.draw(in: bounds)
+        backgroundNSImage.draw(in: bgRect)
 
         // 2. Dark veil
         NSColor.black.withAlphaComponent(0.45).setFill()
@@ -294,7 +298,7 @@ class LassoContentView: NSView {
         guard let r = currentRect else { return }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: r).setClip()
-        backgroundNSImage.draw(in: bounds)
+        backgroundNSImage.draw(in: bgRect)
         NSGraphicsContext.restoreGraphicsState()
 
         let border = NSBezierPath(rect: r)
@@ -312,7 +316,7 @@ class LassoContentView: NSView {
         if points.count >= 2 {
             NSGraphicsContext.saveGraphicsState()
             polygonPath(closed: true).setClip()
-            backgroundNSImage.draw(in: bounds)
+            backgroundNSImage.draw(in: bgRect)
             NSGraphicsContext.restoreGraphicsState()
         }
 

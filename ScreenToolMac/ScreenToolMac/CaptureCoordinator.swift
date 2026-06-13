@@ -200,3 +200,121 @@ extension CaptureCoordinator: LassoOverlayDelegate {
         }
     }
 }
+
+// MARK: - Re-crop an existing image (lasso / polygon) and save in place
+
+private final class CropPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Shows the lasso/polygon overlay over an EXISTING image (aspect-fit on screen),
+/// then overwrites the original file with the cropped result.
+final class ImageCropController: NSObject {
+    private var panel: CropPanel?
+    private var onFinished: (() -> Void)?
+
+    func begin(fileName: String, onFinished: @escaping () -> Void) {
+        self.onFinished = onFinished
+        guard let screen = NSScreen.main,
+              let nsImage = FileStorageManager.shared.load(fileName: fileName),
+              let cg = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            onFinished(); return
+        }
+        let scale = screen.backingScaleFactor
+
+        // Aspect-fit the image into the screen (in points), leaving room for the toolbar.
+        let viewSize = screen.frame.size
+        let avail = CGRect(x: 60, y: 96, width: viewSize.width - 120, height: viewSize.height - 200)
+        let aspect = CGFloat(cg.width) / CGFloat(max(cg.height, 1))
+        var w = avail.width, h = w / aspect
+        if h > avail.height { h = avail.height; w = h * aspect }
+        let fit = CGRect(x: avail.midX - w / 2, y: avail.midY - h / 2, width: w, height: h)
+
+        let content = LassoContentView(backgroundCGImage: cg, scale: scale, mode: .freeform)
+        content.imageRect = fit
+        content.onConfirm = { [weak self] path in
+            self?.finish(path: path, source: cg, fit: fit, fileName: fileName)
+        }
+        content.onCancel = { [weak self] in self?.close() }
+
+        let panel = CropPanel(contentRect: screen.frame,
+                              styleMask: [.borderless, .nonactivatingPanel],
+                              backing: .buffered, defer: false)
+        panel.level = .screenSaver
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.acceptsMouseMovedEvents = true
+        panel.contentView = content
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        self.panel = panel
+    }
+
+    private func finish(path: NSBezierPath, source: CGImage, fit: NSRect, fileName: String) {
+        panel?.orderOut(nil); panel = nil
+        // Back up the original bytes so Cmd+Z can restore an accidental crop.
+        let original = try? Data(contentsOf: FileStorageManager.shared.url(for: fileName))
+        if let cropped = cropImage(source: source, path: path, imageRect: fit) {
+            FileStorageManager.shared.overwrite(fileName: fileName, image: cropped)
+            DataStore.shared.imageDidChange(fileName)
+            registerCropUndo(fileName: fileName, original: original)
+        }
+        onFinished?(); onFinished = nil
+    }
+
+    /// Register a ⌘Z undo on the key window's undo manager that restores the
+    /// pre-crop image bytes.
+    private func registerCropUndo(fileName: String, original: Data?) {
+        guard let original,
+              let um = (NSApp.keyWindow ?? NSApp.mainWindow)?.undoManager else { return }
+        um.registerUndo(withTarget: self) { _ in
+            try? original.write(to: FileStorageManager.shared.url(for: fileName))
+            FileStorageManager.shared.invalidateThumbnail(fileName: fileName)
+            DataStore.shared.imageDidChange(fileName)
+        }
+        um.setActionName("裁剪图片")
+    }
+
+    private func close() {
+        panel?.orderOut(nil); panel = nil
+        onFinished?(); onFinished = nil
+    }
+
+    /// Crop `source` to `path`, where `path` is in view points and the image was
+    /// displayed at `imageRect` (also view points). Output is full image resolution.
+    private func cropImage(source: CGImage, path: NSBezierPath, imageRect: NSRect) -> NSImage? {
+        let imgPxW = CGFloat(source.width), imgPxH = CGFloat(source.height)
+        let sx = imgPxW / imageRect.width, sy = imgPxH / imageRect.height
+
+        let p = path.copy() as! NSBezierPath
+        p.transform(using: AffineTransform(translationByX: -imageRect.minX, byY: -imageRect.minY))
+        p.transform(using: AffineTransform(scaleByX: sx, byY: sy))
+
+        let pb = p.bounds
+        guard pb.width > 1, pb.height > 1 else { return nil }
+        let pxW = Int(pb.width.rounded()), pxH = Int(pb.height.rounded())
+        guard pxW > 0, pxH > 0,
+              let ctx = CGContext(data: nil, width: pxW, height: pxH,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.translateBy(x: 0, y: CGFloat(pxH))
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.translateBy(x: -pb.minX, y: -pb.minY)
+        ctx.addPath(p.cgPath)
+        ctx.clip()
+
+        let ns = NSImage(cgImage: source, size: NSSize(width: imgPxW, height: imgPxH))
+        let prev = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        ns.draw(in: NSRect(x: 0, y: 0, width: imgPxW, height: imgPxH))
+        NSGraphicsContext.current = prev
+
+        guard let out = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: out, size: pb.size)
+    }
+}

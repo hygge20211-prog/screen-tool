@@ -55,8 +55,40 @@ class DataStore: ObservableObject {
         }
     }
 
+    /// An image file was edited in place — drop its cached thumbnail and republish
+    /// so views re-read it.
+    func imageDidChange(_ fileName: String) {
+        FileStorageManager.shared.invalidateThumbnail(fileName: fileName)
+        screenshots = screenshots
+    }
+
+    func rename(_ s: Screenshot, to name: String?) {
+        guard let i = screenshots.firstIndex(where: { $0.id == s.id }) else { return }
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        screenshots[i].name = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        save()
+    }
+
     func screenshots(in folderId: UUID?) -> [Screenshot] {
         screenshots.filter { $0.folderId == folderId }
+    }
+
+    // MARK: - Infinite-canvas layout persistence (one layout per folder)
+
+    private func canvasKey(_ folderId: UUID?) -> String {
+        "mac_canvas_layout_" + (folderId?.uuidString ?? "all")
+    }
+
+    func loadCanvasLayout(folderId: UUID?) -> CanvasLayout {
+        guard let d = UserDefaults.standard.data(forKey: canvasKey(folderId)),
+              let v = try? JSONDecoder().decode(CanvasLayout.self, from: d) else { return CanvasLayout() }
+        return v
+    }
+
+    func saveCanvasLayout(_ layout: CanvasLayout, folderId: UUID?) {
+        if let d = try? JSONEncoder().encode(layout) {
+            UserDefaults.standard.set(d, forKey: canvasKey(folderId))
+        }
     }
 
     private func save() {
