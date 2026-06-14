@@ -879,10 +879,10 @@ struct InfiniteCanvasView: View {
         persist()
     }
 
-    /// Floating toolbar shown at a selected (unlocked) image's top-left: frame-style toggles.
-    /// Layer / lock / group live in the right-click menu.
+    /// Floating toolbar shown to the right of a selected (unlocked) image: frame-style
+    /// toggles, stacked vertically. Layer / lock / group live in the right-click menu.
     @ViewBuilder private func frameButtonRow(_ key: String) -> some View {
-        HStack(spacing: 6) {
+        VStack(spacing: 6) {
             Button { toggleStyle(key, "white") } label: { Image(systemName: "square.dashed") }
                 .foregroundColor(whiteEdge.contains(key) ? .accentColor : .primary)
                 .help(whiteEdge.contains(key) ? "去掉白边" : "加白边")
@@ -895,7 +895,7 @@ struct InfiniteCanvasView: View {
         }
         .font(.system(size: 12))
         .buttonStyle(.borderless)
-        .padding(.horizontal, 6).padding(.vertical, 3)
+        .padding(.horizontal, 4).padding(.vertical, 6)
         .background(.regularMaterial, in: Capsule())
     }
 
@@ -927,6 +927,14 @@ struct InfiniteCanvasView: View {
         return CGPoint(x: pan.width + t.x * effScale + extra.width,
                        y: pan.height + t.y * effScale + extra.height)
     }
+    /// Item center WITHOUT pan. Items live inside the pan-offset container, so pan is
+    /// applied once to the whole layer instead of being baked into every item — this is
+    /// what lets panning move everything without re-rendering each item.
+    private func contentCenter(_ id: String) -> CGPoint {
+        let p = positions[id] ?? CGPoint(x: 200, y: 200)
+        let extra = (groupActive && selected.contains(id)) ? groupDelta : .zero
+        return CGPoint(x: p.x * effScale + extra.width, y: p.y * effScale + extra.height)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -948,12 +956,16 @@ struct InfiniteCanvasView: View {
                     .onTapGesture { NSApp.keyWindow?.makeFirstResponder(nil); selected.removeAll(); persist() }
                     .gesture(marqueeGesture)
 
+                // Pan-offset container: panning moves this whole layer (.offset below)
+                // instead of re-rendering each item. Scale stays baked per item so zoom
+                // stays crisp. "canvas" space lives here too → rotation sees content coords.
+                ZStack(alignment: .topLeading) {
                 // Single ordered pass so images & texts interleave by z-order.
                 // `visible` already excludes off-screen items.
                 ForEach(visible, id: \.self) { key in
                     if key.hasPrefix("t:") {
                         if let i = txtIndex[key] {
-                            CanvasTextView(item: $texts[i], pan: pan, scale: effScale,
+                            CanvasTextView(item: $texts[i], pan: .zero, scale: effScale,
                                            groupOffset: (groupActive && selected.contains(key)) ? groupDelta : .zero,
                                            selected: selected.contains(key),
                                            locked: locked.contains(key),
@@ -969,7 +981,7 @@ struct InfiniteCanvasView: View {
                             image: canvasImage(ss),
                             noShadow: noShadow.contains(key),
                             interacting: interacting,
-                            center: center(key),
+                            center: contentCenter(key),
                             width: imgW(key) * effScale,
                             height: imgH(key) * effScale,
                             selected: selected.contains(key),
@@ -989,6 +1001,10 @@ struct InfiniteCanvasView: View {
                         )
                     }
                 }
+                }   // end pan-offset container
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .coordinateSpace(name: "canvas")
+                .offset(x: pan.width, y: pan.height)
 
                 if let m = marquee {
                     Rectangle().fill(Color.accentColor.opacity(0.12))
@@ -1004,7 +1020,6 @@ struct InfiniteCanvasView: View {
             .overlay(alignment: .bottomLeading) { zoomControls(viewport: geo.size) }
             .clipped()
             .contentShape(Rectangle())
-            .coordinateSpace(name: "canvas")
             // Drop images from Finder right where the mouse is released.
             .onDrop(of: [UTType.fileURL], delegate: CanvasDropDelegate(
                 folderId: folderId,
@@ -1727,11 +1742,11 @@ struct CanvasItemView: View {
                     .padding(4)
             }
         }
-        // Frame-style toolbar (white edge / Polaroid / shadow) above the top-left edge.
-        // Hidden when locked (locked images can't be restyled; unlock via right-click).
-        .overlay(alignment: .topLeading) {
+        // Frame-style toolbar (white edge / Polaroid / shadow) to the right of the frame,
+        // vertically centered. Hidden when locked (unlock via right-click).
+        .overlay(alignment: .trailing) {
             if selected && !locked {
-                frameButtons().offset(y: -34)
+                frameButtons().offset(x: 34)
             }
         }
         // Resize handle (bottom-right)
