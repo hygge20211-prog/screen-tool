@@ -41,6 +41,7 @@ struct GalleryView: View {
     @State private var tileFrames: [UUID: CGRect] = [:] // each tile's frame in the grid space
     @State private var isImportTarget = false           // Finder image hovering over the grid
     @State private var lastViewedId: UUID? = nil         // keep the last-previewed tile highlighted
+    @State private var copyMonitor: Any? = nil           // ⌘C key monitor
 
     var currentScreenshots: [Screenshot] {
         store.screenshots(in: isAllSelected ? nil : selectedFolderId)
@@ -125,6 +126,38 @@ struct GalleryView: View {
         }
         .sheet(item: $renamingScreenshot) { ss in renameScreenshotSheet(ss) }
         .frame(minWidth: 700, minHeight: 500)
+        .onAppear { startCopyMonitor() }
+        .onDisappear { stopCopyMonitor() }
+    }
+
+    // MARK: - ⌘C copy
+
+    private func startCopyMonitor() {
+        copyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  e.charactersIgnoringModifiers == "c" else { return e }
+            // Let text fields handle ⌘C themselves; the canvas has its own handler.
+            if NSApp.keyWindow?.firstResponder is NSText { return e }
+            if viewMode == .canvas { return e }
+            let shots: [Screenshot]
+            if isSelecting && !selectedScreenshots.isEmpty {
+                shots = currentScreenshots.filter { selectedScreenshots.contains($0.id) }
+            } else if let lid = lastViewedId, let s = currentScreenshots.first(where: { $0.id == lid }) {
+                shots = [s]
+            } else {
+                shots = []
+            }
+            guard !shots.isEmpty else { return e }
+            let imgs = shots.compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
+            guard !imgs.isEmpty else { return e }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects(imgs)
+            return nil
+        }
+    }
+
+    private func stopCopyMonitor() {
+        if let m = copyMonitor { NSEvent.removeMonitor(m); copyMonitor = nil }
     }
 
     // MARK: - Folder row
@@ -754,6 +787,7 @@ struct InfiniteCanvasView: View {
     @GestureState private var magLive: CGFloat = 1
     @State private var scrollMonitor: Any?
     @State private var panMonitor: Any?
+    @State private var copyMonitor: Any?
     @State private var loaded = false
     @State private var viewport: CGSize = .zero
 
@@ -1187,11 +1221,26 @@ struct InfiniteCanvasView: View {
         panMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseDragged) { e in
             pan.width += e.deltaX; pan.height += e.deltaY; return e
         }
+        // ⌘C copies the selected canvas images.
+        copyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  e.charactersIgnoringModifiers == "c" else { return e }
+            if NSApp.keyWindow?.firstResponder is NSText { return e }   // editing a text note
+            let ids = selected.filter { !$0.hasPrefix("t:") }
+            let imgs = screenshots
+                .filter { ids.contains($0.id.uuidString) }
+                .compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
+            guard !imgs.isEmpty else { return e }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects(imgs)
+            return nil
+        }
     }
 
     private func stopMonitors() {
         if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil }
         if let m = panMonitor { NSEvent.removeMonitor(m); panMonitor = nil }
+        if let m = copyMonitor { NSEvent.removeMonitor(m); copyMonitor = nil }
     }
 }
 
