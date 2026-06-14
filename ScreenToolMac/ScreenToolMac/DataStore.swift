@@ -7,6 +7,9 @@ class DataStore: ObservableObject {
     @Published var screenshots: [Screenshot] = []
     @Published var folders: [Folder] = []
 
+    /// The folder currently shown in the gallery (nil = 全部). New screenshots go here.
+    var currentFolderId: UUID?
+
     private let ssKey = "mac_screenshots"
     private let fKey  = "mac_folders"
 

@@ -83,7 +83,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.isMovableByWindowBackground = false  // we handle drag vs click ourselves
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false            // stay visible when app loses focus
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
 
         // Custom view distinguishes a click (→ capture) from a drag (→ move only).
         let container = FloatingButtonView()

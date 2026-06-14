@@ -142,7 +142,8 @@ extension CaptureCoordinator: LassoOverlayDelegate {
         guard let cropped = crop(cgImage: cgImg, path: path, scale: scale),
               let fileName = FileStorageManager.shared.save(image: cropped) else { return }
 
-        let screenshot = Screenshot(fileName: fileName, createdAt: Date(), folderId: nil)
+        let screenshot = Screenshot(fileName: fileName, createdAt: Date(),
+                                    folderId: DataStore.shared.currentFolderId)
         DataStore.shared.addScreenshot(screenshot)
         showToast("截图已保存")
     }

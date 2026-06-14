@@ -134,10 +134,18 @@ struct GalleryView: View {
         return Label(name, systemImage: icon)
             .foregroundColor(isActive ? .accentColor : .primary)
             .fontWeight(isActive ? .semibold : .regular)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isActive ? Color.secondary.opacity(0.18) : Color.clear)
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 isAllSelected = isAll
                 selectedFolderId = id
+                store.currentFolderId = isAll ? nil : id   // new screenshots land here
                 selectedScreenshots.removeAll()
                 isSelecting = false
                 lastViewedId = nil
@@ -327,6 +335,12 @@ struct GalleryView: View {
         Button { openInGallery(ss) } label: { Label("查看大图", systemImage: "eye") }
         Button { openInPreview(ss) } label: { Label("在预览中打开", systemImage: "macwindow") }
         Button { revealInFinder(ss) } label: { Label("在 Finder 中显示", systemImage: "folder") }
+        Button {
+            if let img = FileStorageManager.shared.load(fileName: ss.fileName) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects([img])
+            }
+        } label: { Label("复制图片", systemImage: "doc.on.doc") }
         Button { renameText = ss.name ?? ""; renamingScreenshot = ss } label: { Label("重命名", systemImage: "pencil") }
         Button { onRecrop(ss) } label: { Label("重新裁剪", systemImage: "crop") }
         Divider()
@@ -736,10 +750,12 @@ struct InfiniteCanvasView: View {
     @State private var marquee: CGRect? = nil               // screen-space rubber band
     @State private var groupDelta: CGSize = .zero           // live group-move offset (screen)
     @State private var groupActive = false
+    @State private var resizeBaseSizes: [String: CGFloat] = [:]  // per-image base width at resize start
     @GestureState private var magLive: CGFloat = 1
     @State private var scrollMonitor: Any?
     @State private var panMonitor: Any?
     @State private var loaded = false
+    @State private var viewport: CGSize = .zero
 
     private let defaultW: CGFloat = 160
     private let gap: CGFloat = 16
@@ -783,10 +799,13 @@ struct InfiniteCanvasView: View {
                         onSelect: { selected = [id] },
                         onMove: { t in beginGroupDrag(id); groupDelta = t },
                         onMoveEnded: { commitGroupDrag() },
-                        onResize: { newScreenW in sizes[id] = max(40, newScreenW / effScale); persist() },
+                        onResizeBegan: { beginResize(id) },
+                        onResize: { factor in applyResize(factor) },
+                        onResizeEnded: { persist() },
                         rotation: rotations[id] ?? 0,
                         onRotate: { angle in rotateSelectedOrSelf(id: id, toAngle: angle) },
                         onRotateEnded: { persist() },
+                        onDuplicate: { duplicateImage(ss) },
                         menu: { menu(ss) }
                     )
                 }
@@ -796,6 +815,7 @@ struct InfiniteCanvasView: View {
                                    groupOffset: (groupActive && selected.contains(textKey(t))) ? groupDelta : .zero,
                                    selected: selected.contains(textKey(t)),
                                    onSelect: { selected = [textKey(t)] },
+                                   onDuplicate: { duplicateText(t) },
                                    onCommit: persist,
                                    onDelete: { texts.removeAll { $0.id == t.id }; persist() })
                 }
@@ -824,8 +844,47 @@ struct InfiniteCanvasView: View {
                     .updating($magLive) { v, s, _ in s = v }
                     .onEnded { v in scale = min(max(scale * v, 0.25), 4); persist() }
             )
-            .onAppear { loadLayout(in: geo.size); startMonitors() }
+            .onAppear { viewport = geo.size; loadLayout(in: geo.size); startMonitors() }
+            .onChange(of: geo.size) { viewport = $0 }
             .onDisappear { persist(); stopMonitors() }
+        }
+    }
+
+    // ⌥-drag duplicates: leave a copy at the original spot.
+    private func duplicateImage(_ ss: Screenshot) {
+        let id = ss.id.uuidString
+        guard let img = FileStorageManager.shared.load(fileName: ss.fileName),
+              let newName = FileStorageManager.shared.save(image: img) else { return }
+        let copy = Screenshot(fileName: newName, createdAt: Date(), folderId: ss.folderId, name: ss.name)
+        let nid = copy.id.uuidString
+        positions[nid] = positions[id]
+        sizes[nid] = sizes[id]
+        rotations[nid] = rotations[id]
+        aspects[nid] = aspects[id]
+        DataStore.shared.addScreenshot(copy)
+        persist()
+    }
+
+    private func duplicateText(_ t: CanvasTextItem) {
+        var copy = t
+        copy.id = UUID()
+        texts.append(copy)
+        persist()
+    }
+
+    // Batch resize: capture base widths of all selected images, then scale them
+    // together by the drag factor.
+    private func beginResize(_ id: String) {
+        if !selected.contains(id) { selected = [id] }
+        resizeBaseSizes = [:]
+        for sid in selected where !sid.hasPrefix("t:") {
+            resizeBaseSizes[sid] = sizes[sid] ?? defaultW
+        }
+    }
+
+    private func applyResize(_ factor: CGFloat) {
+        for (sid, base) in resizeBaseSizes {
+            sizes[sid] = max(40, base * factor)
         }
     }
 
@@ -901,10 +960,128 @@ struct InfiniteCanvasView: View {
             Button { resetView(viewport: viewport) } label: { Image(systemName: "arrow.counterclockwise") }
                 .foregroundColor(.red)
                 .help("复原默认排列")
+            Divider().frame(height: 16)
+            Menu {
+                Button("300dpi 原图（全部范围）") { exportCanvas(target: nil) }
+                Button("1245 × 1660") { exportCanvas(target: CGSize(width: 1245, height: 1660)) }
+                Button("1200 × 1200") { exportCanvas(target: CGSize(width: 1200, height: 1200)) }
+                Button("自定义尺寸…") { promptCustomSize() }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("导出画布")
         }
         .padding(8)
         .background(.regularMaterial, in: Capsule())
         .padding(12)
+    }
+
+    // MARK: Export
+
+    private func contentBoundingBox() -> CGRect? {
+        var minX = CGFloat.greatestFiniteMagnitude, minY = CGFloat.greatestFiniteMagnitude
+        var maxX = -CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
+        var any = false
+        for ss in screenshots {
+            let id = ss.id.uuidString, p = positions[id] ?? .zero
+            let w = imgW(id), h = imgH(id)
+            minX = min(minX, p.x - w/2); maxX = max(maxX, p.x + w/2)
+            minY = min(minY, p.y - h/2); maxY = max(maxY, p.y + h/2); any = true
+        }
+        for t in texts where !t.text.isEmpty {
+            minX = min(minX, t.x - 4); maxX = max(maxX, t.x + CGFloat(max(t.text.count, 1)) * 10)
+            minY = min(minY, t.y - 12); maxY = max(maxY, t.y + 12); any = true
+        }
+        guard any, maxX > minX, maxY > minY else { return nil }
+        let pad: CGFloat = 24
+        return CGRect(x: minX - pad, y: minY - pad, width: maxX - minX + pad*2, height: maxY - minY + pad*2)
+    }
+
+    /// Render the arranged board to an image. `target` nil = 300dpi of the full
+    /// range; otherwise the content is fit (letterboxed) into the given pixel size.
+    private func renderCanvas(target: CGSize?) -> NSImage? {
+        guard let bbox = contentBoundingBox() else { return nil }
+        let drawScale: CGFloat
+        let outW: Int, outH: Int
+        var ox: CGFloat = 0, oy: CGFloat = 0
+        if let t = target {
+            drawScale = min(t.width / bbox.width, t.height / bbox.height)
+            outW = Int(t.width); outH = Int(t.height)
+            ox = (t.width - bbox.width * drawScale) / 2
+            oy = (t.height - bbox.height * drawScale) / 2
+        } else {
+            drawScale = 300.0 / 72.0
+            outW = Int(bbox.width * drawScale); outH = Int(bbox.height * drawScale)
+        }
+        guard outW > 0, outH > 0,
+              let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+
+        let prev = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: outW, height: outH).fill()
+
+        func mapX(_ x: CGFloat) -> CGFloat { ox + (x - bbox.minX) * drawScale }
+        func mapY(_ y: CGFloat) -> CGFloat { oy + (y - bbox.minY) * drawScale }
+
+        for ss in screenshots {
+            let id = ss.id.uuidString
+            guard let img = FileStorageManager.shared.load(fileName: ss.fileName) else { continue }
+            let w = imgW(id) * drawScale, h = imgH(id) * drawScale
+            let p = positions[id] ?? .zero
+            NSGraphicsContext.saveGraphicsState()
+            let xf = NSAffineTransform()
+            xf.translateX(by: mapX(p.x), yBy: mapY(p.y))
+            if let rot = rotations[id], rot != 0 { xf.rotate(byDegrees: rot) }
+            xf.concat()
+            img.draw(in: NSRect(x: -w/2, y: -h/2, width: w, height: h))
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        for t in texts where !t.text.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 16 * drawScale),
+                .foregroundColor: NSColor.black
+            ]
+            (t.text as NSString).draw(at: NSPoint(x: mapX(t.x), y: mapY(t.y)), withAttributes: attrs)
+        }
+
+        NSGraphicsContext.current = prev
+        guard let cg = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: outW, height: outH))
+    }
+
+    private func exportCanvas(target: CGSize?) {
+        guard let image = renderCanvas(target: target) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "canvas.png"
+        panel.allowedContentTypes = [.png]
+        guard panel.runModal() == .OK, let url = panel.url,
+              let tiff = image.tiffRepresentation,
+              let bm = NSBitmapImageRep(data: tiff),
+              let png = bm.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: url)
+    }
+
+    private func promptCustomSize() {
+        let alert = NSAlert()
+        alert.messageText = "自定义导出尺寸"
+        alert.informativeText = "输入像素尺寸，例如 1000x1400"
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        tf.stringValue = "1200x1200"
+        alert.accessoryView = tf
+        alert.addButton(withTitle: "导出")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let parts = tf.stringValue.lowercased().split(whereSeparator: { $0 == "x" || $0 == "×" || $0 == "*" })
+        if parts.count == 2,
+           let w = Double(parts[0].trimmingCharacters(in: .whitespaces)),
+           let h = Double(parts[1].trimmingCharacters(in: .whitespaces)), w > 0, h > 0 {
+            exportCanvas(target: CGSize(width: w, height: h))
+        }
     }
 
     private func addText(viewport: CGSize) {
@@ -997,7 +1174,14 @@ struct InfiniteCanvasView: View {
 
     private func startMonitors() {
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { e in
-            pan.width += e.scrollingDeltaX; pan.height += e.scrollingDeltaY; return e
+            if e.modifierFlags.contains(.option) {
+                // ⌥ + scroll up = zoom in, down = zoom out
+                if e.scrollingDeltaY > 0 { zoom(1.04, viewport: viewport) }
+                else if e.scrollingDeltaY < 0 { zoom(1 / 1.04, viewport: viewport) }
+            } else {
+                pan.width += e.scrollingDeltaX; pan.height += e.scrollingDeltaY
+            }
+            return e
         }
         // Middle-button (scroll-wheel press) drag pans the canvas.
         panMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseDragged) { e in
@@ -1022,12 +1206,16 @@ struct CanvasItemView: View {
     var onSelect: () -> Void
     var onMove: (CGSize) -> Void
     var onMoveEnded: () -> Void
-    var onResize: (CGFloat) -> Void
+    var onResizeBegan: () -> Void = {}
+    var onResize: (CGFloat) -> Void       // scale factor relative to resize start
+    var onResizeEnded: () -> Void = {}
     var rotation: CGFloat = 0
     var onRotate: (CGFloat) -> Void = { _ in }
     var onRotateEnded: () -> Void = {}
+    var onDuplicate: () -> Void = {}
     var menu: () -> AnyView
     @State private var resizeBase: CGFloat = 0
+    @State private var didDuplicate = false
 
     var body: some View {
         let img = FileStorageManager.shared.thumbnail(fileName: screenshot.fileName, maxPixel: 640)
@@ -1056,10 +1244,10 @@ struct CanvasItemView: View {
                     .gesture(
                         DragGesture()
                             .onChanged { v in
-                                if resizeBase == 0 { resizeBase = width }
-                                onResize(resizeBase + v.translation.width)
+                                if resizeBase == 0 { resizeBase = width; onResizeBegan() }
+                                onResize(max(0.1, (resizeBase + v.translation.width) / resizeBase))
                             }
-                            .onEnded { _ in resizeBase = 0 }
+                            .onEnded { _ in resizeBase = 0; onResizeEnded() }
                     )
             }
         }
@@ -1085,8 +1273,11 @@ struct CanvasItemView: View {
         .onTapGesture { onSelect() }
         .gesture(
             DragGesture(minimumDistance: 4)
-                .onChanged { v in onMove(v.translation) }
-                .onEnded { _ in onMoveEnded() }
+                .onChanged { v in
+                    if !didDuplicate && NSEvent.modifierFlags.contains(.option) { onDuplicate(); didDuplicate = true }
+                    onMove(v.translation)
+                }
+                .onEnded { _ in didDuplicate = false; onMoveEnded() }
         )
         .contextMenu { menu() }
     }
@@ -1134,11 +1325,13 @@ struct CanvasTextView: View {
     var groupOffset: CGSize = .zero
     var selected: Bool = false
     var onSelect: () -> Void = {}
+    var onDuplicate: () -> Void = {}
     var onCommit: () -> Void
     var onDelete: () -> Void
 
     @GestureState private var drag: CGSize = .zero
     @State private var editing = false
+    @State private var didDuplicate = false
 
     private var font: Font { .system(size: 16 * scale) }   // fixed size 16
 
@@ -1156,7 +1349,11 @@ struct CanvasTextView: View {
             .gesture(
                 DragGesture(minimumDistance: 6)
                     .updating($drag) { v, s, _ in s = v.translation }
+                    .onChanged { _ in
+                        if !didDuplicate && NSEvent.modifierFlags.contains(.option) { onDuplicate(); didDuplicate = true }
+                    }
                     .onEnded { v in
+                        didDuplicate = false
                         item.x += v.translation.width / scale
                         item.y += v.translation.height / scale
                         onCommit()
