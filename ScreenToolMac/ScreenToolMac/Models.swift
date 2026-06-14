@@ -20,6 +20,15 @@ struct CanvasLayout: Codable {
     var panX: CGFloat = 0
     var panY: CGFloat = 0
     var scale: CGFloat = 1
+    var background: String? = nil   // canvas background color, hex "#RRGGBB"
+    var showGrid: Bool = false      // (legacy) show a grid background
+    var gridStyle: String = "none"  // background pattern: "none" / "grid" / "dots"
+    var order: [String] = []        // draw order (bottom→top); image uuid or "t:"+uuid
+    var locked: [String] = []       // locked item keys
+    var groups: [[String]] = []     // each group = list of item keys
+    var whiteEdge: [String] = []    // image keys with an irregular white border
+    var polaroid: [String] = []     // image keys with a Polaroid frame
+    var noShadow: [String] = []     // image keys with the drop shadow removed
 }
 
 struct Screenshot: Identifiable, Codable {

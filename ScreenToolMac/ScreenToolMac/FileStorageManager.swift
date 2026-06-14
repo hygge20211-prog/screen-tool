@@ -40,7 +40,8 @@ class FileStorageManager {
     /// decodes the full-resolution PNG, and caches the result so re-rendering the
     /// grid (e.g. switching folders) doesn't re-decode from disk.
     func thumbnail(fileName: String, maxPixel: CGFloat = 320) -> NSImage? {
-        let key = fileName as NSString
+        // Cache per (file, size) so different render-quality buckets coexist.
+        let key = "\(fileName)@\(Int(maxPixel))" as NSString
         if let cached = thumbCache.object(forKey: key) { return cached }
         guard let src = CGImageSourceCreateWithURL(url(for: fileName) as CFURL, nil) else { return nil }
         let opts: [CFString: Any] = [
@@ -55,7 +56,9 @@ class FileStorageManager {
     }
 
     func invalidateThumbnail(fileName: String) {
-        thumbCache.removeObject(forKey: fileName as NSString)
+        // Thumbnails are now keyed by (file, size); clear all buckets. Called only
+        // on re-crop / in-place edits, so the full clear is cheap and rare.
+        thumbCache.removeAllObjects()
     }
 
     /// Overwrite an existing image file in place (used by re-crop).

@@ -13,13 +13,16 @@ enum ViewMode: Hashable {
 struct GalleryView: View {
     @EnvironmentObject var store: DataStore
     let onCapture: (CaptureMode) -> Void
+    let onCaptureNoHide: (CaptureMode) -> Void
     let onRecrop: (Screenshot) -> Void
 
     // Explicit init so it stays callable despite the private @State below
     // (a synthesized memberwise init would be private).
     init(onCapture: @escaping (CaptureMode) -> Void = { _ in },
+         onCaptureNoHide: @escaping (CaptureMode) -> Void = { _ in },
          onRecrop: @escaping (Screenshot) -> Void = { _ in }) {
         self.onCapture = onCapture
+        self.onCaptureNoHide = onCaptureNoHide
         self.onRecrop = onRecrop
     }
 
@@ -134,25 +137,33 @@ struct GalleryView: View {
 
     private func startCopyMonitor() {
         copyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  e.charactersIgnoringModifiers == "c" else { return e }
-            // Let text fields handle ⌘C themselves; the canvas has its own handler.
+            // Let text fields handle keys themselves; the canvas has its own handler.
             if NSApp.keyWindow?.firstResponder is NSText { return e }
             if viewMode == .canvas { return e }
-            let shots: [Screenshot]
-            if isSelecting && !selectedScreenshots.isEmpty {
-                shots = currentScreenshots.filter { selectedScreenshots.contains($0.id) }
-            } else if let lid = lastViewedId, let s = currentScreenshots.first(where: { $0.id == lid }) {
-                shots = [s]
-            } else {
-                shots = []
+
+            // ⌘C — copy
+            if e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               e.charactersIgnoringModifiers == "c" {
+                let shots: [Screenshot]
+                if isSelecting && !selectedScreenshots.isEmpty {
+                    shots = currentScreenshots.filter { selectedScreenshots.contains($0.id) }
+                } else if let lid = lastViewedId, let s = currentScreenshots.first(where: { $0.id == lid }) {
+                    shots = [s]
+                } else { shots = [] }
+                guard !shots.isEmpty else { return e }
+                let imgs = shots.compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
+                guard !imgs.isEmpty else { return e }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects(imgs)
+                return nil
             }
-            guard !shots.isEmpty else { return e }
-            let imgs = shots.compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
-            guard !imgs.isEmpty else { return e }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects(imgs)
-            return nil
+            // Delete / Backspace — delete selected (icon selection mode)
+            if (e.keyCode == 51 || e.keyCode == 117),
+               isSelecting, !selectedScreenshots.isEmpty {
+                deleteSelected()
+                return nil
+            }
+            return e
         }
     }
 
@@ -210,18 +221,32 @@ struct GalleryView: View {
     // polygon / lasso) is chosen inside the capture overlay itself.
 
     private var captureButtons: some View {
-        Button { onCapture(.freeform) } label: {
-            Image("CaptureIcon")
-                .resizable()
-                .scaledToFill()
-                .frame(width: 60, height: 60)
-                .clipShape(Circle())
-                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+        HStack(spacing: 12) {
+            // Capture without hiding the app (so its own window is in the shot)
+            Button { onCaptureNoHide(.freeform) } label: {
+                Image(systemName: "camera.on.rectangle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Color.gray.opacity(0.85)))
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+            }
+            .buttonStyle(.plain)
+            .help("截图（不隐藏本应用，可截到本窗口）")
+
+            Button { onCapture(.freeform) } label: {
+                Image("CaptureIcon")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 60, height: 60)
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("a", modifiers: .option)   // ⌥A
+            .help("开始截图（⌥A，或全局 ⌃⌘5）；进入后可选 矩形 / 多边形 / 套索")
         }
-        .buttonStyle(.plain)
         .padding(24)
-        .keyboardShortcut("a", modifiers: .option)   // ⌥A
-        .help("开始截图（⌥A，或全局 ⌃⌘5）；进入后可选 矩形 / 多边形 / 套索")
     }
 
     // MARK: - Toolbar
@@ -789,16 +814,107 @@ struct InfiniteCanvasView: View {
     @State private var panMonitor: Any?
     @State private var copyMonitor: Any?
     @State private var loaded = false
+    @State private var isInteracting = false             // true while panning / dragging an item
+    @State private var interactClear: DispatchWorkItem?  // debounced reset for scroll/trackpad pan
     @State private var viewport: CGSize = .zero
+    @State private var bgColor: Color = .white
+    @State private var gridStyle: String = "none"   // "none" / "grid" / "dots"
+    @State private var exportRect: CGRect? = nil     // export frame (content coords)
+    @State private var exportTarget: CGSize? = nil   // target px (aspect locked)
+    @State private var exportDragStart: CGRect? = nil
+    @State private var order: [String] = []          // z-order (bottom→top)
+    @State private var locked: Set<String> = []      // locked item keys
+    @State private var groups: [[String]] = []       // grouped item keys
+    @State private var whiteEdge: Set<String> = []   // images with a white border
+    @State private var polaroid: Set<String> = []    // images with a Polaroid frame
+    @State private var noShadow: Set<String> = []     // images with no drop shadow
+    @State private var styledCache: [String: NSImage] = [:]   // key+flags → styled thumbnail
+    @State private var styledAspectCache: [String: CGFloat] = [:]   // key → styled aspect (O(1))
+    /// Canvas render quality (0=低/1=中/2=高). Lower = smaller thumbnails = smoother.
+    @AppStorage("canvasRenderQuality") private var renderQuality = 0
 
     private let defaultW: CGFloat = 160
     private let gap: CGFloat = 16
 
     private var effScale: CGFloat { scale * magLive }
+    /// Thumbnail pixel size used for on-canvas display, driven by the quality picker.
+    private var renderMaxPixel: CGFloat { [256, 512, 1024][min(2, max(0, renderQuality))] }
 
     private func imgW(_ id: String) -> CGFloat { sizes[id] ?? defaultW }
-    private func imgH(_ id: String) -> CGFloat { imgW(id) / (aspects[id] ?? (160.0 / 120.0)) }
+    private func imgH(_ id: String) -> CGFloat { imgW(id) / displayAspect(id) }
     private func textKey(_ t: CanvasTextItem) -> String { "t:" + t.id.uuidString }
+
+    private func isStyled(_ key: String) -> Bool { whiteEdge.contains(key) || polaroid.contains(key) }
+
+    /// Aspect (w/h) used for layout — O(1); reflects any frame so canvas == export.
+    private func displayAspect(_ key: String) -> CGFloat {
+        if isStyled(key), let a = styledAspectCache[key] { return a }
+        return aspects[key] ?? (160.0 / 120.0)
+    }
+
+    /// Styled thumbnail for canvas display (takes the resolved screenshot to avoid
+    /// per-item lookups; caches the styled image + its aspect).
+    private func canvasImage(_ ss: Screenshot) -> NSImage? {
+        let key = ss.id.uuidString
+        guard let base = FileStorageManager.shared.thumbnail(fileName: ss.fileName, maxPixel: renderMaxPixel) else { return nil }
+        guard isStyled(key) else { return base }
+        let cacheKey = key + (whiteEdge.contains(key) ? "|w" : "") + (polaroid.contains(key) ? "|p" : "") + "@\(renderQuality)"
+        if let c = styledCache[cacheKey] { return c }
+        let styled = ImageStyler.styled(base, whiteEdge: whiteEdge.contains(key), polaroid: polaroid.contains(key))
+        styledCache[cacheKey] = styled
+        if styled.size.height > 0 { styledAspectCache[key] = styled.size.width / styled.size.height }
+        return styled
+    }
+
+    private func toggleStyle(_ key: String, _ kind: String) {
+        switch kind {
+        case "white": if whiteEdge.contains(key) { whiteEdge.remove(key) } else { whiteEdge.insert(key) }
+        case "polaroid": if polaroid.contains(key) { polaroid.remove(key) } else { polaroid.insert(key) }
+        case "shadow": if noShadow.contains(key) { noShadow.remove(key) } else { noShadow.insert(key) }
+        default: break
+        }
+        // Drop every cached variant (all flags, all quality buckets) for this image.
+        styledCache = styledCache.filter { !$0.key.hasPrefix(key) }
+        styledAspectCache.removeValue(forKey: key)
+        persist()
+    }
+
+    /// Floating toolbar shown at a selected (unlocked) image's top-left: frame-style toggles.
+    /// Layer / lock / group live in the right-click menu.
+    @ViewBuilder private func frameButtonRow(_ key: String) -> some View {
+        HStack(spacing: 6) {
+            Button { toggleStyle(key, "white") } label: { Image(systemName: "square.dashed") }
+                .foregroundColor(whiteEdge.contains(key) ? .accentColor : .primary)
+                .help(whiteEdge.contains(key) ? "去掉白边" : "加白边")
+            Button { toggleStyle(key, "polaroid") } label: { Image(systemName: "photo.artframe") }
+                .foregroundColor(polaroid.contains(key) ? .accentColor : .primary)
+                .help(polaroid.contains(key) ? "去掉拍立得相框" : "拍立得相框")
+            Button { toggleStyle(key, "shadow") } label: { Image(systemName: "square.on.square") }
+                .foregroundColor(noShadow.contains(key) ? .accentColor : .primary)
+                .help(noShadow.contains(key) ? "恢复阴影" : "取消阴影")
+        }
+        .font(.system(size: 12))
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(.regularMaterial, in: Capsule())
+    }
+
+    // Viewport culling: render only items near the visible area (selected always shown).
+    private func isImageVisible(_ key: String, in viewport: CGSize) -> Bool {
+        if selected.contains(key) { return true }
+        let c = center(key), w = imgW(key) * effScale, h = imgH(key) * effScale
+        let m: CGFloat = 150
+        return CGRect(x: c.x - w/2 - m, y: c.y - h/2 - m, width: w + 2*m, height: h + 2*m)
+            .intersects(CGRect(origin: .zero, size: viewport))
+    }
+    private func isTextVisible(_ t: CanvasTextItem, in viewport: CGSize) -> Bool {
+        if selected.contains(textKey(t)) { return true }
+        let c = textCenter(t)
+        let w = max(40, CGFloat(t.text.count) * 16 * effScale * 0.7), h = 40 * effScale
+        let m: CGFloat = 150
+        return CGRect(x: c.x - w/2 - m, y: c.y - h/2 - m, width: w + 2*m, height: h + 2*m)
+            .intersects(CGRect(origin: .zero, size: viewport))
+    }
 
     private func center(_ id: String) -> CGPoint {
         let p = positions[id] ?? CGPoint(x: 200, y: 200)
@@ -814,44 +930,64 @@ struct InfiniteCanvasView: View {
 
     var body: some View {
         GeometryReader { geo in
+            // Build O(1) lookups once per render (avoids O(n²) per-item scans).
+            let byId = Dictionary(screenshots.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { a, _ in a })
+            let txtIndex = Dictionary(texts.enumerated().map { (textKey($0.element), $0.offset) }, uniquingKeysWith: { a, _ in a })
+            // Only on-screen items get a view (identity/gestures/menus track visible count, not total).
+            let visible = displayOrder.filter { key in
+                if key.hasPrefix("t:") { return txtIndex[key].map { isTextVisible(texts[$0], in: geo.size) } ?? false }
+                return byId[key] != nil && isImageVisible(key, in: geo.size)
+            }
+            let interacting = isInteracting || magLive != 1
             ZStack(alignment: .topLeading) {
-                // White board — left-drag = box-select; single-click = confirm text
-                // edit + clear selection (and save). Pan via middle-drag / scroll.
-                Color.white
+                // Board background — left-drag = box-select; single-click = confirm
+                // text edit + clear selection. Pan via middle-drag / scroll.
+                bgColor
+                    .overlay { if gridStyle != "none" { gridOverlay } }
                     .contentShape(Rectangle())
                     .onTapGesture { NSApp.keyWindow?.makeFirstResponder(nil); selected.removeAll(); persist() }
                     .gesture(marqueeGesture)
 
-                ForEach(screenshots) { ss in
-                    let id = ss.id.uuidString
-                    CanvasItemView(
-                        screenshot: ss,
-                        center: center(id),
-                        width: imgW(id) * effScale,
-                        height: imgH(id) * effScale,
-                        selected: selected.contains(id),
-                        onSelect: { selected = [id] },
-                        onMove: { t in beginGroupDrag(id); groupDelta = t },
-                        onMoveEnded: { commitGroupDrag() },
-                        onResizeBegan: { beginResize(id) },
-                        onResize: { factor in applyResize(factor) },
-                        onResizeEnded: { persist() },
-                        rotation: rotations[id] ?? 0,
-                        onRotate: { angle in rotateSelectedOrSelf(id: id, toAngle: angle) },
-                        onRotateEnded: { persist() },
-                        onDuplicate: { duplicateImage(ss) },
-                        menu: { menu(ss) }
-                    )
-                }
-
-                ForEach($texts) { $t in
-                    CanvasTextView(item: $t, pan: pan, scale: effScale,
-                                   groupOffset: (groupActive && selected.contains(textKey(t))) ? groupDelta : .zero,
-                                   selected: selected.contains(textKey(t)),
-                                   onSelect: { selected = [textKey(t)] },
-                                   onDuplicate: { duplicateText(t) },
-                                   onCommit: persist,
-                                   onDelete: { texts.removeAll { $0.id == t.id }; persist() })
+                // Single ordered pass so images & texts interleave by z-order.
+                // `visible` already excludes off-screen items.
+                ForEach(visible, id: \.self) { key in
+                    if key.hasPrefix("t:") {
+                        if let i = txtIndex[key] {
+                            CanvasTextView(item: $texts[i], pan: pan, scale: effScale,
+                                           groupOffset: (groupActive && selected.contains(key)) ? groupDelta : .zero,
+                                           selected: selected.contains(key),
+                                           locked: locked.contains(key),
+                                           onSelect: { selectItem(key) },
+                                           onDuplicate: { duplicateText(texts[i]) },
+                                           extraMenu: { AnyView(layerLockGroupMenu(key)) },
+                                           onCommit: persist,
+                                           onDelete: { deleteKey(key) })
+                        }
+                    } else if let ss = byId[key] {
+                        CanvasItemView(
+                            screenshot: ss,
+                            image: canvasImage(ss),
+                            noShadow: noShadow.contains(key),
+                            interacting: interacting,
+                            center: center(key),
+                            width: imgW(key) * effScale,
+                            height: imgH(key) * effScale,
+                            selected: selected.contains(key),
+                            locked: locked.contains(key),
+                            onSelect: { selectItem(key) },
+                            onMove: { t in beginGroupDrag(key); groupDelta = t },
+                            onMoveEnded: { commitGroupDrag() },
+                            onResizeBegan: { beginResize(key) },
+                            onResize: { factor in applyResize(factor) },
+                            onResizeEnded: { persist() },
+                            rotation: rotations[key] ?? 0,
+                            onRotate: { angle in rotateSelectedOrSelf(id: key, toAngle: angle) },
+                            onRotateEnded: { persist() },
+                            onDuplicate: { duplicateImage(ss) },
+                            menu: { AnyView(Group { menu(ss); Divider(); layerLockGroupMenu(key) }) },
+                            frameButtons: { AnyView(frameButtonRow(key)) }
+                        )
+                    }
                 }
 
                 if let m = marquee {
@@ -862,8 +998,10 @@ struct InfiniteCanvasView: View {
                         .allowsHitTesting(false)
                 }
 
-                controls(viewport: geo.size)
+                exportFrameOverlay(viewport: geo.size)
             }
+            .overlay(alignment: .topLeading) { topControls(viewport: geo.size) }
+            .overlay(alignment: .bottomLeading) { zoomControls(viewport: geo.size) }
             .clipped()
             .contentShape(Rectangle())
             .coordinateSpace(name: "canvas")
@@ -930,11 +1068,100 @@ struct InfiniteCanvasView: View {
         }
     }
 
+    // MARK: Layers / lock / group
+
+    private var allKeys: [String] {
+        screenshots.map { $0.id.uuidString } + texts.map { textKey($0) }
+    }
+    /// Persisted order with stale keys dropped and any new keys appended (on top).
+    private var displayOrder: [String] {
+        let valid = Set(allKeys)
+        var result = order.filter { valid.contains($0) }
+        let present = Set(result)
+        for k in allKeys where !present.contains(k) { result.append(k) }
+        return result
+    }
+    private func materializeOrder() { order = displayOrder }
+
+    private func selectItem(_ key: String) {
+        if let g = groups.first(where: { $0.contains(key) }) { selected = Set(g) }
+        else { selected = [key] }
+    }
+    private func selectIfNeeded(_ key: String) { if !selected.contains(key) { selectItem(key) } }
+
+    private func bringToFront() {
+        materializeOrder(); let sel = order.filter { selected.contains($0) }
+        order.removeAll { selected.contains($0) }; order.append(contentsOf: sel); persist()
+    }
+    private func sendToBack() {
+        materializeOrder(); let sel = order.filter { selected.contains($0) }
+        order.removeAll { selected.contains($0) }; order.insert(contentsOf: sel, at: 0); persist()
+    }
+    private func moveForward() {
+        materializeOrder(); var a = order
+        if a.count >= 2 { for i in stride(from: a.count - 2, through: 0, by: -1)
+            where selected.contains(a[i]) && !selected.contains(a[i+1]) { a.swapAt(i, i+1) } }
+        order = a; persist()
+    }
+    private func moveBackward() {
+        materializeOrder(); var a = order
+        if a.count >= 2 { for i in 1..<a.count
+            where selected.contains(a[i]) && !selected.contains(a[i-1]) { a.swapAt(i, i-1) } }
+        order = a; persist()
+    }
+
+    private func toggleLock(_ key: String) {
+        let keys = selected.contains(key) ? selected : [key]
+        if keys.allSatisfy({ locked.contains($0) }) { locked.subtract(keys) } else { locked.formUnion(keys) }
+        persist()
+    }
+    private func groupSelected() {
+        guard selected.count >= 2 else { return }
+        groups.removeAll { !Set($0).isDisjoint(with: selected) }
+        groups.append(Array(selected)); persist()
+    }
+    private func ungroup(_ key: String) { groups.removeAll { $0.contains(key) }; persist() }
+
+    private func deleteKey(_ key: String) {
+        if key.hasPrefix("t:") {
+            texts.removeAll { textKey($0) == key }
+        } else if let ss = screenshots.first(where: { $0.id.uuidString == key }) {
+            DataStore.shared.delete(ss)
+        }
+        order.removeAll { $0 == key }
+        locked.remove(key)
+        groups = groups.map { $0.filter { $0 != key } }.filter { $0.count >= 2 }
+        selected.remove(key)
+        persist()
+    }
+
+    @ViewBuilder private func layerLockGroupMenu(_ key: String) -> some View {
+        Button("置于顶层") { selectIfNeeded(key); bringToFront() }
+        Button("置于底层") { selectIfNeeded(key); sendToBack() }
+        Button("上移一层") { selectIfNeeded(key); moveForward() }
+        Button("下移一层") { selectIfNeeded(key); moveBackward() }
+        Divider()
+        Button(locked.contains(key) ? "解锁" : "锁定") { toggleLock(key) }
+        Button("编组") { groupSelected() }.disabled(selected.count < 2)
+        Button("解组") { ungroup(key) }.disabled(!groups.contains { $0.contains(key) })
+    }
+
     // MARK: Selection / group move
 
+    /// Mark the canvas as actively moving (suppresses shadows for smoothness) and
+    /// schedule a reset — used by scroll/trackpad pan, which has no gesture end.
+    private func markInteracting() {
+        isInteracting = true
+        interactClear?.cancel()
+        let work = DispatchWorkItem { isInteracting = false }
+        interactClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
     private func beginGroupDrag(_ id: String) {
-        if !selected.contains(id) { selected = [id] }
+        if !selected.contains(id) { selectItem(id) }
         groupActive = true
+        isInteracting = true
     }
 
     private func commitGroupDrag() {
@@ -949,6 +1176,7 @@ struct InfiniteCanvasView: View {
             texts[i].x += dx; texts[i].y += dy
         }
         groupActive = false; groupDelta = .zero
+        isInteracting = false
         persist()
     }
 
@@ -982,10 +1210,92 @@ struct InfiniteCanvasView: View {
 
     // MARK: Controls
 
-    private func controls(viewport: CGSize) -> some View {
-        HStack(spacing: 8) {
-            Button { addText(viewport: viewport) } label: { Label("文本", systemImage: "textbox") }
+    private var gridOverlay: some View {
+        Canvas { ctx, size in
+            let step = max(8, 40 * effScale)
+            var sx = pan.width.truncatingRemainder(dividingBy: step); if sx > 0 { sx -= step }
+            var sy = pan.height.truncatingRemainder(dividingBy: step); if sy > 0 { sy -= step }
+            if gridStyle == "dots" {
+                var y = sy
+                while y <= size.height {
+                    var x = sx
+                    while x <= size.width {
+                        let r: CGFloat = 1.2
+                        ctx.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                                 with: .color(.gray.opacity(0.4)))
+                        x += step
+                    }
+                    y += step
+                }
+            } else {
+                var x = sx
+                while x <= size.width {
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                               with: .color(.gray.opacity(0.18)), lineWidth: 0.5)
+                    x += step
+                }
+                var y = sy
+                while y <= size.height {
+                    ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: y)); $0.addLine(to: CGPoint(x: size.width, y: y)) },
+                               with: .color(.gray.opacity(0.18)), lineWidth: 0.5)
+                    y += step
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    // Top-left: text, background colour + eyedropper, grid/dots, export.
+    private func topControls(viewport: CGSize) -> some View {
+        HStack(spacing: 10) {
+            Button { addText(viewport: viewport) } label: { Image(systemName: "textbox") }
+                .help("添加文本")
             Divider().frame(height: 16)
+            ColorPicker("", selection: $bgColor, supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 24)
+                .onChange(of: bgColor) { _ in persist() }
+                .help("画布底色")
+            Button { sampleColor() } label: { Image(systemName: "eyedropper") }
+                .help("吸管：从屏幕取色作为底色")
+            // Background pattern, tiled inline
+            Picker("", selection: $gridStyle) {
+                Image(systemName: "slash.circle").tag("none")
+                Image(systemName: "grid").tag("grid")
+                Image(systemName: "circle.grid.2x2").tag("dots")
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .onChange(of: gridStyle) { _ in persist() }
+            .help("背景：无 / 网格 / 点阵")
+            Divider().frame(height: 16)
+            // Render quality: lower = smaller thumbnails = smoother with many images.
+            Picker("", selection: $renderQuality) {
+                Text("低").tag(0); Text("中").tag(1); Text("高").tag(2)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .onChange(of: renderQuality) { _ in styledCache.removeAll(); styledAspectCache.removeAll() }
+            .help("渲染质量：低更流畅 / 高更清晰")
+            Divider().frame(height: 16)
+            Menu {
+                Button("当前视图范围（150dpi）") { exportViewport() }
+                Button("1245 × 1660") { beginExportFrame(CGSize(width: 1245, height: 1660), viewport: viewport) }
+                Button("自定义尺寸…") { promptCustomSize(viewport: viewport) }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .menuIndicator(.hidden).fixedSize()
+            .help("导出画布")
+        }
+        .font(.system(size: 14))
+        .buttonStyle(.borderless)
+        .padding(8)
+        .background(.regularMaterial, in: Capsule())
+        .padding(12)
+    }
+
+    // Bottom-left: zoom / fit / reset.
+    private func zoomControls(viewport: CGSize) -> some View {
+        HStack(spacing: 8) {
             Button { zoom(1 / 1.25, viewport: viewport) } label: { Image(systemName: "minus.magnifyingglass") }
             Text("\(Int(scale * 100))%").font(.caption.monospacedDigit()).frame(width: 44)
             Button { zoom(1.25, viewport: viewport) } label: { Image(systemName: "plus.magnifyingglass") }
@@ -994,22 +1304,66 @@ struct InfiniteCanvasView: View {
             Button { resetView(viewport: viewport) } label: { Image(systemName: "arrow.counterclockwise") }
                 .foregroundColor(.red)
                 .help("复原默认排列")
-            Divider().frame(height: 16)
-            Menu {
-                Button("300dpi 原图（全部范围）") { exportCanvas(target: nil) }
-                Button("1245 × 1660") { exportCanvas(target: CGSize(width: 1245, height: 1660)) }
-                Button("1200 × 1200") { exportCanvas(target: CGSize(width: 1200, height: 1200)) }
-                Button("自定义尺寸…") { promptCustomSize() }
-            } label: {
-                Image(systemName: "square.and.arrow.up")
-            }
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("导出画布")
         }
         .padding(8)
         .background(.regularMaterial, in: Capsule())
         .padding(12)
+    }
+
+    private func sampleColor() {
+        NSColorSampler().show { picked in
+            if let c = picked { bgColor = Color(nsColor: c); persist() }
+        }
+    }
+
+    // Export frame: aspect-locked rectangle the user moves/resizes, then confirms.
+    @ViewBuilder private func exportFrameOverlay(viewport: CGSize) -> some View {
+        if let r = exportRect, let target = exportTarget {
+            let sr = CGRect(x: pan.width + r.minX * effScale, y: pan.height + r.minY * effScale,
+                            width: r.width * effScale, height: r.height * effScale)
+            let aspect = target.width / target.height
+            ZStack {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.06))
+                    .overlay(Rectangle().strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6])))
+                    .frame(width: sr.width, height: sr.height)
+                    .position(x: sr.midX, y: sr.midY)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { v in
+                                if exportDragStart == nil { exportDragStart = exportRect }
+                                if let base = exportDragStart {
+                                    exportRect = CGRect(x: base.minX + v.translation.width / effScale,
+                                                        y: base.minY + v.translation.height / effScale,
+                                                        width: base.width, height: base.height)
+                                }
+                            }
+                            .onEnded { _ in exportDragStart = nil }
+                    )
+                // resize handle (bottom-right), keeps target aspect
+                Circle().fill(Color.accentColor).frame(width: 16, height: 16)
+                    .position(x: sr.maxX, y: sr.maxY)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { v in
+                                if exportDragStart == nil { exportDragStart = exportRect }
+                                if let base = exportDragStart {
+                                    let newW = max(40, base.width + v.translation.width / effScale)
+                                    exportRect = CGRect(x: base.minX, y: base.minY, width: newW, height: newW / aspect)
+                                }
+                            }
+                            .onEnded { _ in exportDragStart = nil }
+                    )
+                // confirm / cancel
+                HStack(spacing: 8) {
+                    Button { confirmExport() } label: { Label("导出", systemImage: "checkmark.circle.fill") }
+                        .buttonStyle(.borderedProminent)
+                    Button { exportRect = nil; exportTarget = nil } label: { Text("取消") }
+                        .buttonStyle(.bordered)
+                }
+                .position(x: sr.midX, y: max(20, sr.minY - 20))
+            }
+        }
     }
 
     // MARK: Export
@@ -1033,54 +1387,74 @@ struct InfiniteCanvasView: View {
         return CGRect(x: minX - pad, y: minY - pad, width: maxX - minX + pad*2, height: maxY - minY + pad*2)
     }
 
-    /// Render the arranged board to an image. `target` nil = 300dpi of the full
-    /// range; otherwise the content is fit (letterboxed) into the given pixel size.
-    private func renderCanvas(target: CGSize?) -> NSImage? {
-        guard let bbox = contentBoundingBox() else { return nil }
+    /// Render a region of the board (in content points) to an image.
+    /// `target` nil → render at `dpi`; otherwise output exactly `target` px
+    /// (the caller keeps `rect` locked to `target`'s aspect, so no letterbox).
+    private func renderCanvas(contentRect rect: CGRect, target: CGSize?, dpi: CGFloat = 150) -> NSImage? {
+        guard rect.width > 1, rect.height > 1 else { return nil }
         let drawScale: CGFloat
         let outW: Int, outH: Int
-        var ox: CGFloat = 0, oy: CGFloat = 0
         if let t = target {
-            drawScale = min(t.width / bbox.width, t.height / bbox.height)
-            outW = Int(t.width); outH = Int(t.height)
-            ox = (t.width - bbox.width * drawScale) / 2
-            oy = (t.height - bbox.height * drawScale) / 2
+            drawScale = t.width / rect.width
+            outW = Int(t.width.rounded()); outH = Int(t.height.rounded())
         } else {
-            drawScale = 300.0 / 72.0
-            outW = Int(bbox.width * drawScale); outH = Int(bbox.height * drawScale)
+            drawScale = dpi / 72.0
+            outW = Int((rect.width * drawScale).rounded()); outH = Int((rect.height * drawScale).rounded())
         }
         guard outW > 0, outH > 0,
               let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        // Work in CONTENT POINTS, y-down, origin at rect.minX/minY — same flip
+        // convention as the (verified-correct) CaptureCoordinator.crop().
+        ctx.translateBy(x: 0, y: CGFloat(outH))
+        ctx.scaleBy(x: drawScale, y: -drawScale)
+        ctx.translateBy(x: -rect.minX, y: -rect.minY)
 
         let prev = NSGraphicsContext.current
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
-        NSColor.white.setFill()
-        NSRect(x: 0, y: 0, width: outW, height: outH).fill()
 
-        func mapX(_ x: CGFloat) -> CGFloat { ox + (x - bbox.minX) * drawScale }
-        func mapY(_ y: CGFloat) -> CGFloat { oy + (y - bbox.minY) * drawScale }
+        (NSColor(bgColor).usingColorSpace(.sRGB) ?? .white).setFill()
+        NSBezierPath(rect: rect).fill()
 
-        for ss in screenshots {
-            let id = ss.id.uuidString
-            guard let img = FileStorageManager.shared.load(fileName: ss.fileName) else { continue }
-            let w = imgW(id) * drawScale, h = imgH(id) * drawScale
-            let p = positions[id] ?? .zero
-            NSGraphicsContext.saveGraphicsState()
-            let xf = NSAffineTransform()
-            xf.translateX(by: mapX(p.x), yBy: mapY(p.y))
-            if let rot = rotations[id], rot != 0 { xf.rotate(byDegrees: rot) }
-            xf.concat()
-            img.draw(in: NSRect(x: -w/2, y: -h/2, width: w, height: h))
-            NSGraphicsContext.restoreGraphicsState()
+        if gridStyle != "none" {
+            let step: CGFloat = 40
+            let x0 = (rect.minX / step).rounded(.down) * step
+            let y0 = (rect.minY / step).rounded(.down) * step
+            if gridStyle == "dots" {
+                NSColor.gray.withAlphaComponent(0.4).setFill()
+                let r: CGFloat = 1.2
+                var y = y0
+                while y <= rect.maxY { var x = x0; while x <= rect.maxX { NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: r*2, height: r*2)).fill(); x += step }; y += step }
+            } else {
+                NSColor.gray.withAlphaComponent(0.18).setStroke()
+                let p = NSBezierPath(); p.lineWidth = 0.5
+                var x = x0; while x <= rect.maxX { p.move(to: NSPoint(x: x, y: rect.minY)); p.line(to: NSPoint(x: x, y: rect.maxY)); x += step }
+                var y = y0; while y <= rect.maxY { p.move(to: NSPoint(x: rect.minX, y: y)); p.line(to: NSPoint(x: rect.maxX, y: y)); y += step }
+                p.stroke()
+            }
         }
-        for t in texts where !t.text.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 16 * drawScale),
-                .foregroundColor: NSColor.black
-            ]
-            (t.text as NSString).draw(at: NSPoint(x: mapX(t.x), y: mapY(t.y)), withAttributes: attrs)
+
+        // Draw in z-order so images & texts interleave the same as on-canvas.
+        for key in displayOrder {
+            if key.hasPrefix("t:") {
+                guard let t = texts.first(where: { textKey($0) == key }), !t.text.isEmpty else { continue }
+                let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.black]
+                let sz = (t.text as NSString).size(withAttributes: attrs)
+                (t.text as NSString).draw(at: NSPoint(x: t.x - sz.width/2, y: t.y - sz.height/2), withAttributes: attrs)
+            } else if let ss = screenshots.first(where: { $0.id.uuidString == key }),
+                      let raw = FileStorageManager.shared.load(fileName: ss.fileName) {
+                let img = ImageStyler.styled(raw, whiteEdge: whiteEdge.contains(key), polaroid: polaroid.contains(key))
+                let w = imgW(key), h = imgH(key), p = positions[key] ?? .zero
+                NSGraphicsContext.saveGraphicsState()
+                let xf = NSAffineTransform()
+                xf.translateX(by: p.x, yBy: p.y)
+                if let rot = rotations[key], rot != 0 { xf.rotate(byDegrees: rot) }
+                xf.concat()
+                img.draw(in: NSRect(x: -w/2, y: -h/2, width: w, height: h))
+                NSGraphicsContext.restoreGraphicsState()
+            }
         }
 
         NSGraphicsContext.current = prev
@@ -1088,8 +1462,7 @@ struct InfiniteCanvasView: View {
         return NSImage(cgImage: cg, size: NSSize(width: outW, height: outH))
     }
 
-    private func exportCanvas(target: CGSize?) {
-        guard let image = renderCanvas(target: target) else { return }
+    private func savePNG(_ image: NSImage) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "canvas.png"
         panel.allowedContentTypes = [.png]
@@ -1100,21 +1473,47 @@ struct InfiniteCanvasView: View {
         try? png.write(to: url)
     }
 
-    private func promptCustomSize() {
+    /// The current visible viewport, in content coords.
+    private func viewportContentRect() -> CGRect {
+        CGRect(x: -pan.width / effScale, y: -pan.height / effScale,
+               width: viewport.width / effScale, height: viewport.height / effScale)
+    }
+
+    private func exportViewport() {
+        if let img = renderCanvas(contentRect: viewportContentRect(), target: nil, dpi: 150) { savePNG(img) }
+    }
+
+    // Show an aspect-locked export frame over the canvas; user adjusts then confirms.
+    private func beginExportFrame(_ target: CGSize, viewport: CGSize) {
+        exportTarget = target
+        let aspect = target.width / target.height
+        let base = contentBoundingBox() ?? viewportContentRect()
+        var w = base.width, h = w / aspect
+        if h < base.height { h = base.height; w = h * aspect }
+        exportRect = CGRect(x: base.midX - w/2, y: base.midY - h/2, width: w, height: h)
+    }
+
+    private func confirmExport() {
+        guard let rect = exportRect, let target = exportTarget else { return }
+        if let img = renderCanvas(contentRect: rect, target: target) { savePNG(img) }
+        exportRect = nil; exportTarget = nil
+    }
+
+    private func promptCustomSize(viewport: CGSize) {
         let alert = NSAlert()
         alert.messageText = "自定义导出尺寸"
         alert.informativeText = "输入像素尺寸，例如 1000x1400"
         let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
         tf.stringValue = "1200x1200"
         alert.accessoryView = tf
-        alert.addButton(withTitle: "导出")
+        alert.addButton(withTitle: "确定")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let parts = tf.stringValue.lowercased().split(whereSeparator: { $0 == "x" || $0 == "×" || $0 == "*" })
         if parts.count == 2,
            let w = Double(parts[0].trimmingCharacters(in: .whitespaces)),
            let h = Double(parts[1].trimmingCharacters(in: .whitespaces)), w > 0, h > 0 {
-            exportCanvas(target: CGSize(width: w, height: h))
+            beginExportFrame(CGSize(width: w, height: h), viewport: viewport)
         }
     }
 
@@ -1190,24 +1589,37 @@ struct InfiniteCanvasView: View {
         texts = l.texts
         pan = CGSize(width: l.panX, height: l.panY)
         scale = l.scale == 0 ? 1 : l.scale
+        if let bg = l.background { bgColor = Color(hexString: bg) }
+        gridStyle = l.gridStyle
+        order = l.order
+        locked = Set(l.locked)
+        groups = l.groups
+        whiteEdge = Set(l.whiteEdge)
+        polaroid = Set(l.polaroid)
+        noShadow = Set(l.noShadow)
         for ss in screenshots {
             if let img = FileStorageManager.shared.thumbnail(fileName: ss.fileName) {
                 aspects[ss.id.uuidString] = img.size.width / max(img.size.height, 1)
             }
         }
         layout(in: size)
+        order = displayOrder   // materialize (append any new keys)
     }
 
     private func persist() {
         DataStore.shared.saveCanvasLayout(
             CanvasLayout(positions: positions, sizes: sizes, rotations: rotations, texts: texts,
-                         panX: pan.width, panY: pan.height, scale: scale),
+                         panX: pan.width, panY: pan.height, scale: scale,
+                         background: bgColor.toHexString(), gridStyle: gridStyle,
+                         order: displayOrder, locked: Array(locked), groups: groups,
+                         whiteEdge: Array(whiteEdge), polaroid: Array(polaroid), noShadow: Array(noShadow)),
             folderId: folderId
         )
     }
 
     private func startMonitors() {
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { e in
+            markInteracting()
             if e.modifierFlags.contains(.option) {
                 // ⌥ + scroll up = zoom in, down = zoom out
                 if e.scrollingDeltaY > 0 { zoom(1.04, viewport: viewport) }
@@ -1219,21 +1631,39 @@ struct InfiniteCanvasView: View {
         }
         // Middle-button (scroll-wheel press) drag pans the canvas.
         panMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseDragged) { e in
+            markInteracting()
             pan.width += e.deltaX; pan.height += e.deltaY; return e
         }
-        // ⌘C copies the selected canvas images.
+        // ⌘C copies the selected canvas images; Delete removes the selection.
         copyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-            guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  e.charactersIgnoringModifiers == "c" else { return e }
             if NSApp.keyWindow?.firstResponder is NSText { return e }   // editing a text note
-            let ids = selected.filter { !$0.hasPrefix("t:") }
-            let imgs = screenshots
-                .filter { ids.contains($0.id.uuidString) }
-                .compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
-            guard !imgs.isEmpty else { return e }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects(imgs)
-            return nil
+            // ⌘C copy
+            if e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               e.charactersIgnoringModifiers == "c" {
+                let ids = selected.filter { !$0.hasPrefix("t:") }
+                let imgs = screenshots
+                    .filter { ids.contains($0.id.uuidString) }
+                    .compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
+                guard !imgs.isEmpty else { return e }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects(imgs)
+                return nil
+            }
+            // Delete / Backspace removes selected images & texts
+            if e.keyCode == 51 || e.keyCode == 117, !selected.isEmpty {
+                let keys = selected
+                for ss in screenshots where keys.contains(ss.id.uuidString) {
+                    DataStore.shared.delete(ss)
+                }
+                texts.removeAll { keys.contains(textKey($0)) }
+                order.removeAll { keys.contains($0) }
+                locked.subtract(keys)
+                groups = groups.map { $0.filter { !keys.contains($0) } }.filter { $0.count >= 2 }
+                selected.removeAll()
+                persist()
+                return nil
+            }
+            return e
         }
     }
 
@@ -1248,10 +1678,14 @@ struct InfiniteCanvasView: View {
 /// whole selection), drag the corner handle to resize.
 struct CanvasItemView: View {
     let screenshot: Screenshot
+    var image: NSImage? = nil
+    var noShadow: Bool = false
+    var interacting: Bool = false   // pan/zoom/drag in progress → skip shadow for smoothness
     let center: CGPoint
     let width: CGFloat
     let height: CGFloat
     let selected: Bool
+    var locked: Bool = false
     var onSelect: () -> Void
     var onMove: (CGSize) -> Void
     var onMoveEnded: () -> Void
@@ -1263,11 +1697,12 @@ struct CanvasItemView: View {
     var onRotateEnded: () -> Void = {}
     var onDuplicate: () -> Void = {}
     var menu: () -> AnyView
+    var frameButtons: () -> AnyView = { AnyView(EmptyView()) }
     @State private var resizeBase: CGFloat = 0
     @State private var didDuplicate = false
 
     var body: some View {
-        let img = FileStorageManager.shared.thumbnail(fileName: screenshot.fileName, maxPixel: 640)
+        let img = image ?? FileStorageManager.shared.thumbnail(fileName: screenshot.fileName, maxPixel: 640)
         return Group {
             if let img {
                 Image(nsImage: img).resizable().scaledToFit()
@@ -1276,16 +1711,32 @@ struct CanvasItemView: View {
             }
         }
         .frame(width: width, height: height)
-        .clipped()
-        .cornerRadius(6)
-        .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
+        .cornerRadius(6)   // also clips (scaledToFit never overflows, so no separate .clipped() needed)
+        .shadow(color: (noShadow || interacting) ? .clear : .black.opacity(0.25),
+                radius: (noShadow || interacting) ? 0 : 4, y: (noShadow || interacting) ? 0 : 2)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 2)
         )
+        // Lock badge (top-right, clear of the frame button row)
+        .overlay(alignment: .topTrailing) {
+            if locked {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9, weight: .bold)).foregroundColor(.white)
+                    .padding(3).background(Circle().fill(Color.black.opacity(0.5)))
+                    .padding(4)
+            }
+        }
+        // Frame-style toolbar (white edge / Polaroid / shadow) above the top-left edge.
+        // Hidden when locked (locked images can't be restyled; unlock via right-click).
+        .overlay(alignment: .topLeading) {
+            if selected && !locked {
+                frameButtons().offset(y: -34)
+            }
+        }
         // Resize handle (bottom-right)
         .overlay(alignment: .bottomTrailing) {
-            if selected {
+            if selected && !locked {
                 Circle().fill(Color.accentColor)
                     .frame(width: 16, height: 16)
                     .overlay(Image(systemName: "arrow.down.right").font(.system(size: 8, weight: .bold)).foregroundColor(.white))
@@ -1302,7 +1753,7 @@ struct CanvasItemView: View {
         }
         // Rotation handle (top-center)
         .overlay(alignment: .top) {
-            if selected {
+            if selected && !locked {
                 Circle().fill(Color.accentColor)
                     .frame(width: 16, height: 16)
                     .overlay(Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 8, weight: .bold)).foregroundColor(.white))
@@ -1326,7 +1777,8 @@ struct CanvasItemView: View {
                     if !didDuplicate && NSEvent.modifierFlags.contains(.option) { onDuplicate(); didDuplicate = true }
                     onMove(v.translation)
                 }
-                .onEnded { _ in didDuplicate = false; onMoveEnded() }
+                .onEnded { _ in didDuplicate = false; onMoveEnded() },
+            including: locked ? .subviews : .all   // locked → no move
         )
         .contextMenu { menu() }
     }
@@ -1373,8 +1825,10 @@ struct CanvasTextView: View {
     let scale: CGFloat
     var groupOffset: CGSize = .zero
     var selected: Bool = false
+    var locked: Bool = false
     var onSelect: () -> Void = {}
     var onDuplicate: () -> Void = {}
+    var extraMenu: () -> AnyView = { AnyView(EmptyView()) }
     var onCommit: () -> Void
     var onDelete: () -> Void
 
@@ -1407,7 +1861,7 @@ struct CanvasTextView: View {
                         item.y += v.translation.height / scale
                         onCommit()
                     },
-                including: editing ? .subviews : .all
+                including: (editing || locked) ? .subviews : .all
             )
             .onAppear { if item.text.isEmpty { editing = true } }
     }
@@ -1436,12 +1890,21 @@ struct CanvasTextView: View {
                 .padding(2)
                 .overlay(RoundedRectangle(cornerRadius: 4)
                     .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 2))
+                .overlay(alignment: .topLeading) {
+                    if locked {
+                        Image(systemName: "lock.fill").font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.white).padding(2).background(Circle().fill(Color.black.opacity(0.5)))
+                            .offset(x: -6, y: -6)
+                    }
+                }
                 .contentShape(Rectangle())
-                .onTapGesture(count: 2) { editing = true }
+                .onTapGesture(count: 2) { if !locked { editing = true } }
                 .onTapGesture { onSelect() }
                 .contextMenu {
                     Button { editing = true } label: { Label("编辑", systemImage: "pencil") }
                     Button(role: .destructive, action: onDelete) { Label("删除", systemImage: "trash") }
+                    Divider()
+                    extraMenu()
                 }
         }
     }
@@ -1517,5 +1980,27 @@ final class CanvasKeyTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+}
+
+// MARK: - Color <-> hex
+
+extension Color {
+    init(hexString: String) {
+        let s = hexString.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        var v: UInt64 = 0
+        Scanner(string: s).scanHexInt64(&v)
+        let r = Double((v >> 16) & 0xff) / 255
+        let g = Double((v >> 8) & 0xff) / 255
+        let b = Double(v & 0xff) / 255
+        self = Color(.sRGB, red: r, green: g, blue: b)
+    }
+
+    func toHexString() -> String {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? .white
+        return String(format: "#%02X%02X%02X",
+                      Int(round(ns.redComponent * 255)),
+                      Int(round(ns.greenComponent * 255)),
+                      Int(round(ns.blueComponent * 255)))
     }
 }

@@ -45,6 +45,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    // Flush UserDefaults once on quit (we no longer synchronize on every edit).
+    func applicationWillTerminate(_ notification: Notification) {
+        UserDefaults.standard.synchronize()
+    }
+
     // MARK: - Capture (hide window first so it isn't in the shot)
 
     func startCaptureHidingWindow(mode: CaptureMode) {
@@ -55,6 +60,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.coordinator.startCapture(mode: mode)
         }
+    }
+
+    /// Capture WITHOUT hiding the app — so its own windows are in the shot.
+    func startCaptureNoHide(mode: CaptureMode) {
+        restoreGalleryAfterCapture = false
+        coordinator.startCapture(mode: mode)
     }
 
     // Re-crop an existing image (lasso / polygon) and overwrite it in place.
@@ -156,6 +167,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         captureMenuItem.submenu = captureMenu
         let cap = captureMenu.addItem(withTitle: "截图", action: #selector(menuCapture), keyEquivalent: "")
         cap.target = self
+        let capNoHide = captureMenu.addItem(withTitle: "截图（不隐藏本应用）", action: #selector(menuCaptureNoHide), keyEquivalent: "")
+        capNoHide.target = self
         captureMenu.addItem(.separator())
         let fb = captureMenu.addItem(withTitle: "悬浮截图按钮",
                                      action: #selector(toggleFloatingButton), keyEquivalent: "")
@@ -166,6 +179,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func menuCapture() { startCaptureHidingWindow(mode: .freeform) }
+    @objc private func menuCaptureNoHide() { startCaptureNoHide(mode: .freeform) }
 
     // MARK: - Status Bar
 
@@ -222,6 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openGallery() {
         if galleryWindow == nil {
             let view = GalleryView(onCapture: { [weak self] mode in self?.startCaptureHidingWindow(mode: mode) },
+                                   onCaptureNoHide: { [weak self] mode in self?.startCaptureNoHide(mode: mode) },
                                    onRecrop: { [weak self] ss in self?.recrop(ss) })
                 .environmentObject(DataStore.shared)
             let hosting = NSHostingController(rootView: view)

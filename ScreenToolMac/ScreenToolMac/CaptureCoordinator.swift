@@ -319,3 +319,62 @@ final class ImageCropController: NSObject {
         return NSImage(cgImage: out, size: pb.size)
     }
 }
+
+// MARK: - Image framing (white edge / Polaroid)
+
+/// Bakes optional frames into an image, used for both canvas display and export.
+enum ImageStyler {
+    static func styled(_ base: NSImage, whiteEdge: Bool, polaroid: Bool) -> NSImage {
+        var img = base
+        if whiteEdge { img = addWhiteEdge(img, fraction: 0.03) }
+        if polaroid  { img = addPolaroid(img) }
+        return img
+    }
+
+    /// White-tinted copy preserving the original alpha (the silhouette).
+    private static func whiteSilhouette(_ base: NSImage) -> NSImage {
+        let size = base.size
+        let img = NSImage(size: size)
+        img.lockFocus()
+        base.draw(in: NSRect(origin: .zero, size: size))
+        NSColor.white.set()
+        NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
+        img.unlockFocus()
+        return img
+    }
+
+    /// A white outline hugging the (irregular) silhouette — dilate by stamping the
+    /// white silhouette around a circle, then draw the original on top.
+    static func addWhiteEdge(_ base: NSImage, fraction: CGFloat) -> NSImage {
+        let s = base.size
+        guard s.width > 0, s.height > 0 else { return base }
+        let o = max(2, s.width * fraction)
+        let newSize = NSSize(width: s.width + 2*o, height: s.height + 2*o)
+        let sil = whiteSilhouette(base)
+        let out = NSImage(size: newSize)
+        out.lockFocus()
+        let steps = 48
+        for i in 0..<steps {
+            let a = CGFloat(i) / CGFloat(steps) * 2 * .pi
+            sil.draw(in: NSRect(x: o + cos(a) * o, y: o + sin(a) * o, width: s.width, height: s.height))
+        }
+        base.draw(in: NSRect(x: o, y: o, width: s.width, height: s.height))
+        out.unlockFocus()
+        return out
+    }
+
+    /// A white Polaroid frame (wider bottom margin).
+    static func addPolaroid(_ base: NSImage) -> NSImage {
+        let s = base.size
+        guard s.width > 0, s.height > 0 else { return base }
+        let side = s.width * 0.06, top = s.width * 0.06, bottom = s.width * 0.20
+        let newSize = NSSize(width: s.width + 2*side, height: s.height + top + bottom)
+        let out = NSImage(size: newSize)
+        out.lockFocus()
+        NSColor.white.set()
+        NSBezierPath(rect: NSRect(origin: .zero, size: newSize)).fill()
+        base.draw(in: NSRect(x: side, y: bottom, width: s.width, height: s.height))  // y-up: bottom margin wider
+        out.unlockFocus()
+        return out
+    }
+}
