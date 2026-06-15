@@ -86,7 +86,7 @@ class LassoContentView: NSView {
     private var cancelBtn: NSButton!
     private var hintLabel: NSTextField!
 
-    private let modeOrder: [CaptureMode] = [.freeform, .rectangle]
+    private let modeOrder: [CaptureMode] = [.freeform, .rectangle, .circle, .roundedRect, .heart, .star]
 
     init(backgroundCGImage: CGImage, scale: CGFloat, mode: CaptureMode) {
         self.backgroundCGImage = backgroundCGImage
@@ -100,6 +100,7 @@ class LassoContentView: NSView {
         switch mode {
         case .freeform:  return "单击加顶点 / 按住拖动自由勾勒（可混用）→ 双击 · 回到起点 · 「确认截图」闭合　·　⌫ 撤销　Esc 取消"
         case .rectangle: return "按住拖动画出矩形 → 点「确认截图」截取　·　Esc 取消"
+        default:         return "按住拖动画出形状范围 → 点「确认截图」截取　·　Esc 取消"
         }
     }
 
@@ -120,7 +121,7 @@ class LassoContentView: NSView {
 
         // Shape picker lives inside the capture overlay so the user switches
         // rectangle / polygon / lasso while capturing.
-        modeSelector = NSSegmentedControl(labels: ["多边形 / 套索", "矩形"],
+        modeSelector = NSSegmentedControl(labels: ["套索", "矩形", "圆形", "圆角", "心形", "星形"],
                                           trackingMode: .selectOne,
                                           target: self, action: #selector(modeChanged))
         modeSelector.selectedSegment = modeOrder.firstIndex(of: mode) ?? 0
@@ -179,13 +180,13 @@ class LassoContentView: NSView {
         let pt = convert(event.locationInWindow, from: nil)
         cursor = pt
         switch mode {
-        case .rectangle:
-            rectStart = pt; rectEnd = pt
         case .freeform:
             if event.clickCount >= 2 { confirm(); return }   // double-click finishes
             if nearStart(pt) { confirm(); return }            // click the start to close
             isDragging = false
             points.append(pt)                                 // a click = one vertex
+        default:                                              // box shapes
+            rectStart = pt; rectEnd = pt
         }
         updateButtons()
         needsDisplay = true
@@ -195,8 +196,8 @@ class LassoContentView: NSView {
         let pt = convert(event.locationInWindow, from: nil)
         cursor = pt
         switch mode {
-        case .rectangle: rectEnd = pt
-        case .freeform:  isDragging = true; points.append(pt)  // trace a freehand trail
+        case .freeform: isDragging = true; points.append(pt)  // trace a freehand trail
+        default:        rectEnd = pt
         }
         updateButtons()
         needsDisplay = true
@@ -205,11 +206,11 @@ class LassoContentView: NSView {
     override func mouseUp(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
         switch mode {
-        case .rectangle:
-            rectEnd = pt
         case .freeform:
             // A freehand stroke released near the start auto-closes the loop.
             if isDragging, let last = points.last, nearStart(last) { confirm() }
+        default:
+            rectEnd = pt
         }
         isDragging = false
         updateButtons()
@@ -238,12 +239,12 @@ class LassoContentView: NSView {
 
     private func updateButtons() {
         switch mode {
-        case .rectangle:
-            confirmBtn.isEnabled = currentRect != nil
-            clearBtn.isEnabled = rectStart != nil
         case .freeform:
             confirmBtn.isEnabled = points.count >= 3   // need at least a triangle
             clearBtn.isEnabled = !points.isEmpty
+        default:
+            confirmBtn.isEnabled = currentRect != nil
+            clearBtn.isEnabled = rectStart != nil
         }
     }
 
@@ -258,13 +259,61 @@ class LassoContentView: NSView {
     /// The selection path for the current mode (closed, ready to crop).
     private func selectionPath() -> NSBezierPath? {
         switch mode {
-        case .rectangle:
-            guard let r = currentRect else { return nil }
-            return NSBezierPath(rect: r)
         case .freeform:
             guard points.count >= 3 else { return nil }
             return polygonPath(closed: true)
+        default:
+            guard let r = currentRect else { return nil }
+            return shapePath(in: r)
         }
+    }
+
+    /// Closed path for a box-drawn shape fitted to `r`.
+    private func shapePath(in r: NSRect) -> NSBezierPath {
+        switch mode {
+        case .circle:
+            return NSBezierPath(ovalIn: r)
+        case .roundedRect:
+            let rad = min(r.width, r.height) * 0.18
+            return NSBezierPath(roundedRect: r, xRadius: rad, yRadius: rad)
+        case .heart:
+            return heartPath(in: r)
+        case .star:
+            return starPath(in: r)
+        default:    // .rectangle (and any fallthrough)
+            return NSBezierPath(rect: r)
+        }
+    }
+
+    /// A smooth heart fitted to `r` (view is y-down: tip at the bottom, lobes at the top).
+    private func heartPath(in r: NSRect) -> NSBezierPath {
+        func pt(_ fx: CGFloat, _ fy: CGFloat) -> NSPoint {
+            NSPoint(x: r.minX + r.width * fx, y: r.minY + r.height * fy)
+        }
+        let p = NSBezierPath()
+        p.move(to: pt(0.5, 0.90))                                                              // bottom tip
+        p.curve(to: pt(0.02, 0.32), controlPoint1: pt(0.36, 0.70), controlPoint2: pt(0.02, 0.52))
+        p.curve(to: pt(0.5, 0.26),  controlPoint1: pt(0.02, 0.10), controlPoint2: pt(0.34, 0.06))  // left lobe → notch
+        p.curve(to: pt(0.98, 0.32), controlPoint1: pt(0.66, 0.06), controlPoint2: pt(0.98, 0.10))  // notch → right lobe
+        p.curve(to: pt(0.5, 0.90),  controlPoint1: pt(0.98, 0.52), controlPoint2: pt(0.64, 0.70))
+        p.close()
+        return p
+    }
+
+    /// A 5-point star with a fixed square proportion (centred in `r`, never stretched).
+    private func starPath(in r: NSRect) -> NSBezierPath {
+        let cx = r.midX, cy = r.midY
+        let radius = min(r.width, r.height) / 2
+        let p = NSBezierPath()
+        let n = 5
+        for i in 0..<(n * 2) {
+            let rr = ((i % 2 == 0) ? 1.0 : 0.40) * radius
+            let angle = -CGFloat.pi / 2 + CGFloat(i) * (.pi / CGFloat(n))
+            let q = NSPoint(x: cx + rr * cos(angle), y: cy + rr * sin(angle))
+            if i == 0 { p.move(to: q) } else { p.line(to: q) }
+        }
+        p.close()
+        return p
     }
 
     /// Closed polygon through all committed vertices.
@@ -287,21 +336,22 @@ class LassoContentView: NSView {
         NSColor.black.withAlphaComponent(0.45).setFill()
         NSBezierPath(rect: bounds).fill()
 
-        if mode == .rectangle {
-            drawRectangleSelection()
-        } else {
+        if mode == .freeform {
             drawPathSelection()
+        } else {
+            drawShapeSelection()
         }
     }
 
-    private func drawRectangleSelection() {
+    private func drawShapeSelection() {
         guard let r = currentRect else { return }
+        let path = shapePath(in: r)
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: r).setClip()
+        path.setClip()
         backgroundNSImage.draw(in: bgRect)
         NSGraphicsContext.restoreGraphicsState()
 
-        let border = NSBezierPath(rect: r)
+        let border = shapePath(in: r)
         border.lineWidth = 2
         var dash: [CGFloat] = [8, 4]
         border.setLineDash(&dash, count: 2, phase: 0)

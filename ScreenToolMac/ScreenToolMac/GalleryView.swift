@@ -64,6 +64,10 @@ struct GalleryView: View {
                                 Button { renameText = folder.name; renamingFolder = folder } label: {
                                     Label("重命名", systemImage: "pencil")
                                 }
+                                Button { store.duplicateFolder(folder) } label: {
+                                    Label("复制文件夹", systemImage: "plus.square.on.square")
+                                }
+                                Divider()
                                 Button(role: .destructive) { store.deleteFolder(folder) } label: {
                                     Label("删除文件夹", systemImage: "trash")
                                 }
@@ -557,7 +561,7 @@ struct GalleryView: View {
                 else if let d = item as? Data { url = URL(dataRepresentation: d, relativeTo: nil) }
                 guard let fileURL = url,
                       let img = NSImage(contentsOf: fileURL),
-                      let name = FileStorageManager.shared.save(image: img) else { return }
+                      let name = FileStorageManager.shared.save(image: img, into: DataStore.shared.subdirName(for: folderId)) else { return }
                 DispatchQueue.main.async {
                     store.addScreenshot(Screenshot(fileName: name, createdAt: Date(), folderId: folderId))
                 }
@@ -821,6 +825,7 @@ struct InfiniteCanvasView: View {
     @State private var gridStyle: String = "none"   // "none" / "grid" / "dots"
     @State private var exportRect: CGRect? = nil     // export frame (content coords)
     @State private var exportTarget: CGSize? = nil   // target px (aspect locked)
+    @State private var exportDrawAspect: CGFloat? = nil   // non-nil = user is drawing the frame
     @State private var exportDragStart: CGRect? = nil
     @State private var order: [String] = []          // z-order (bottom→top)
     @State private var locked: Set<String> = []      // locked item keys
@@ -838,7 +843,7 @@ struct InfiniteCanvasView: View {
 
     private var effScale: CGFloat { scale * magLive }
     /// Thumbnail pixel size used for on-canvas display, driven by the quality picker.
-    private var renderMaxPixel: CGFloat { [256, 512, 1024][min(2, max(0, renderQuality))] }
+    private var renderMaxPixel: CGFloat { renderQuality <= 0 ? 256 : 1024 }   // Low / High
 
     private func imgW(_ id: String) -> CGFloat { sizes[id] ?? defaultW }
     private func imgH(_ id: String) -> CGFloat { imgW(id) / displayAspect(id) }
@@ -866,16 +871,36 @@ struct InfiniteCanvasView: View {
         return styled
     }
 
-    private func toggleStyle(_ key: String, _ kind: String) {
+    private func styleIsOn(_ key: String, _ kind: String) -> Bool {
         switch kind {
-        case "white": if whiteEdge.contains(key) { whiteEdge.remove(key) } else { whiteEdge.insert(key) }
-        case "polaroid": if polaroid.contains(key) { polaroid.remove(key) } else { polaroid.insert(key) }
-        case "shadow": if noShadow.contains(key) { noShadow.remove(key) } else { noShadow.insert(key) }
+        case "white": return whiteEdge.contains(key)
+        case "polaroid": return polaroid.contains(key)
+        case "shadow": return noShadow.contains(key)
+        default: return false
+        }
+    }
+    /// Set a frame style on/off for one image (no persist — callers batch + persist).
+    private func setStyle(_ key: String, _ kind: String, _ on: Bool) {
+        switch kind {
+        case "white": if on { whiteEdge.insert(key) } else { whiteEdge.remove(key) }
+        case "polaroid": if on { polaroid.insert(key) } else { polaroid.remove(key) }
+        case "shadow": if on { noShadow.insert(key) } else { noShadow.remove(key) }
         default: break
         }
         // Drop every cached variant (all flags, all quality buckets) for this image.
         styledCache = styledCache.filter { !$0.key.hasPrefix(key) }
         styledAspectCache.removeValue(forKey: key)
+    }
+    private func toggleStyle(_ key: String, _ kind: String) {
+        setStyle(key, kind, !styleIsOn(key, kind))
+        persist()
+    }
+    /// Toggle a style across all selected images: if all already have it, remove from all; else add to all.
+    private func batchToggleStyle(_ kind: String) {
+        let imgs = selected.filter { !$0.hasPrefix("t:") }
+        guard !imgs.isEmpty else { return }
+        let allOn = imgs.allSatisfy { styleIsOn($0, kind) }
+        for key in imgs { setStyle(key, kind, !allOn) }
         persist()
     }
 
@@ -892,6 +917,26 @@ struct InfiniteCanvasView: View {
             Button { toggleStyle(key, "shadow") } label: { Image(systemName: "square.on.square") }
                 .foregroundColor(noShadow.contains(key) ? .accentColor : .primary)
                 .help(noShadow.contains(key) ? "恢复阴影" : "取消阴影")
+        }
+        .font(.system(size: 12))
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 4).padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
+    }
+
+    /// Same frame-style buttons on the unified multi-select frame — apply to all selected.
+    @ViewBuilder private func frameButtonRowMulti() -> some View {
+        let imgs = selected.filter { !$0.hasPrefix("t:") }
+        let allWhite = !imgs.isEmpty && imgs.allSatisfy { whiteEdge.contains($0) }
+        let allPola  = !imgs.isEmpty && imgs.allSatisfy { polaroid.contains($0) }
+        let allNoSh  = !imgs.isEmpty && imgs.allSatisfy { noShadow.contains($0) }
+        VStack(spacing: 6) {
+            Button { batchToggleStyle("white") } label: { Image(systemName: "square.dashed") }
+                .foregroundColor(allWhite ? .accentColor : .primary).help("白边")
+            Button { batchToggleStyle("polaroid") } label: { Image(systemName: "photo.artframe") }
+                .foregroundColor(allPola ? .accentColor : .primary).help("拍立得相框")
+            Button { batchToggleStyle("shadow") } label: { Image(systemName: "square.on.square") }
+                .foregroundColor(allNoSh ? .accentColor : .primary).help("阴影")
         }
         .font(.system(size: 12))
         .buttonStyle(.borderless)
@@ -947,13 +992,17 @@ struct InfiniteCanvasView: View {
                 return byId[key] != nil && isImageVisible(key, in: geo.size)
             }
             let interacting = isInteracting || magLive != 1
+            let isMulti = selected.count > 1   // multi-select → one unified frame, no per-item chrome
             ZStack(alignment: .topLeading) {
                 // Board background — left-drag = box-select; single-click = confirm
                 // text edit + clear selection. Pan via middle-drag / scroll.
                 bgColor
                     .overlay { if gridStyle != "none" { gridOverlay } }
                     .contentShape(Rectangle())
-                    .onTapGesture { NSApp.keyWindow?.makeFirstResponder(nil); selected.removeAll(); persist() }
+                    .onTapGesture {
+                        if exportDrawAspect != nil { cancelExportFrame(); return }   // tap cancels frame-draw
+                        NSApp.keyWindow?.makeFirstResponder(nil); selected.removeAll(); persist()
+                    }
                     .gesture(marqueeGesture)
 
                 // Pan-offset container: panning moves this whole layer (.offset below)
@@ -985,6 +1034,7 @@ struct InfiniteCanvasView: View {
                             width: imgW(key) * effScale,
                             height: imgH(key) * effScale,
                             selected: selected.contains(key),
+                            multiSelected: isMulti,
                             locked: locked.contains(key),
                             onSelect: { selectItem(key) },
                             onMove: { t in beginGroupDrag(key); groupDelta = t },
@@ -996,10 +1046,21 @@ struct InfiniteCanvasView: View {
                             onRotate: { angle in rotateSelectedOrSelf(id: key, toAngle: angle) },
                             onRotateEnded: { persist() },
                             onDuplicate: { duplicateImage(ss) },
-                            menu: { AnyView(Group { menu(ss); Divider(); layerLockGroupMenu(key) }) },
+                            menu: { AnyView(canvasImageMenu(ss, key)) },
                             frameButtons: { AnyView(frameButtonRow(key)) }
                         )
                     }
+                }
+                // One unified frame around the whole multi-selection, with the edit
+                // buttons on it (apply to every selected image).
+                if isMulti, let box = unifiedSelectionBox() {
+                    Rectangle()
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [5]))
+                        .frame(width: box.width, height: box.height)
+                        .position(x: box.midX, y: box.midY)
+                        .allowsHitTesting(false)
+                    frameButtonRowMulti()
+                        .position(x: box.maxX + 30, y: box.midY)
                 }
                 }   // end pan-offset container
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
@@ -1015,9 +1076,21 @@ struct InfiniteCanvasView: View {
                 }
 
                 exportFrameOverlay(viewport: geo.size)
+
+                // Hint while drawing the export frame.
+                if exportDrawAspect != nil {
+                    HStack(spacing: 10) {
+                        Image(systemName: "rectangle.dashed")
+                        Text("拖动绘制导出范围（按所选比例）")
+                        Button("取消") { cancelExportFrame() }.buttonStyle(.borderless)
+                    }
+                    .font(.system(size: 12)).padding(8)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 60)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
             }
             .overlay(alignment: .topLeading) { topControls(viewport: geo.size) }
-            .overlay(alignment: .bottomLeading) { zoomControls(viewport: geo.size) }
             .clipped()
             .contentShape(Rectangle())
             // Drop images from Finder right where the mouse is released.
@@ -1033,6 +1106,7 @@ struct InfiniteCanvasView: View {
             )
             .onAppear { viewport = geo.size; loadLayout(in: geo.size); startMonitors() }
             .onChange(of: geo.size) { viewport = $0 }
+            .onChange(of: screenshots.count) { _ in ensureAspects() }
             .onDisappear { persist(); stopMonitors() }
         }
     }
@@ -1041,7 +1115,7 @@ struct InfiniteCanvasView: View {
     private func duplicateImage(_ ss: Screenshot) {
         let id = ss.id.uuidString
         guard let img = FileStorageManager.shared.load(fileName: ss.fileName),
-              let newName = FileStorageManager.shared.save(image: img) else { return }
+              let newName = FileStorageManager.shared.save(image: img, into: DataStore.shared.subdirName(for: ss.folderId)) else { return }
         let copy = Screenshot(fileName: newName, createdAt: Date(), folderId: ss.folderId, name: ss.name)
         let nid = copy.id.uuidString
         positions[nid] = positions[id]
@@ -1098,11 +1172,91 @@ struct InfiniteCanvasView: View {
     }
     private func materializeOrder() { order = displayOrder }
 
+    /// Fill in aspect ratios (from the PNG header) for any images that don't have one yet
+    /// — e.g. captures / drops added while the canvas is open. Without this they fall back
+    /// to a default aspect and look stretched (most visibly in exports).
+    private func ensureAspects() {
+        for ss in screenshots where aspects[ss.id.uuidString] == nil {
+            if let sz = FileStorageManager.shared.pixelSize(fileName: ss.fileName), sz.height > 0 {
+                aspects[ss.id.uuidString] = sz.width / sz.height
+            }
+        }
+    }
+
     private func selectItem(_ key: String) {
         if let g = groups.first(where: { $0.contains(key) }) { selected = Set(g) }
         else { selected = [key] }
     }
     private func selectIfNeeded(_ key: String) { if !selected.contains(key) { selectItem(key) } }
+
+    // MARK: Multi-select batch actions (canvas)
+
+    private func selectedScreenshotItems() -> [Screenshot] {
+        let ids = selected.filter { !$0.hasPrefix("t:") }
+        return screenshots.filter { ids.contains($0.id.uuidString) }
+    }
+    private func copySelectedImages() {
+        let imgs = selectedScreenshotItems().compactMap { FileStorageManager.shared.load(fileName: $0.fileName) }
+        guard !imgs.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects(imgs)
+    }
+    private func moveSelected(to folderId: UUID?) {
+        for ss in selectedScreenshotItems() { DataStore.shared.move(ss, to: folderId) }
+    }
+    private func deleteSelectedItems() {
+        let keys = selected
+        for ss in screenshots where keys.contains(ss.id.uuidString) { DataStore.shared.delete(ss) }
+        texts.removeAll { keys.contains(textKey($0)) }
+        order.removeAll { keys.contains($0) }
+        locked.subtract(keys)
+        groups = groups.map { $0.filter { !keys.contains($0) } }.filter { $0.count >= 2 }
+        selected.removeAll()
+        persist()
+    }
+
+    /// Right-click menu for a canvas image. When it's part of a multi-selection the
+    /// actions apply to every selected image; otherwise it's the normal single-item menu.
+    @ViewBuilder private func canvasImageMenu(_ ss: Screenshot, _ key: String) -> some View {
+        let n = selected.filter { !$0.hasPrefix("t:") }.count
+        let multi = n > 1 && selected.contains(key)
+        // Two independent `if`s (not if/else) so the context menu wires up every button.
+        if multi {
+            Button { copySelectedImages() } label: { Label("复制 \(n) 张图片", systemImage: "doc.on.doc") }
+            Menu {
+                Button("未分类") { moveSelected(to: nil) }
+                ForEach(DataStore.shared.folders) { f in Button(f.name) { moveSelected(to: f.id) } }
+            } label: { Label("移动 \(n) 张到…", systemImage: "folder") }
+            Button(role: .destructive) { deleteSelectedItems() } label: { Label("删除 \(n) 张", systemImage: "trash") }
+            Divider()
+        }
+        if !multi {
+            menu(ss)
+            Divider()
+        }
+        layerLockGroupMenu(key)
+    }
+
+    /// Union frame (container coords, no pan) around all selected items → the unified box.
+    private func unifiedSelectionBox() -> CGRect? {
+        var u: CGRect? = nil
+        for key in selected {
+            let r: CGRect
+            if key.hasPrefix("t:") {
+                guard let t = texts.first(where: { textKey($0) == key }) else { continue }
+                let extra = (groupActive && selected.contains(key)) ? groupDelta : .zero
+                let c = CGPoint(x: t.x * effScale + extra.width, y: t.y * effScale + extra.height)
+                let w = max(40, CGFloat(t.text.count) * 16 * effScale * 0.7), h = 40 * effScale
+                r = CGRect(x: c.x - w/2, y: c.y - h/2, width: w, height: h)
+            } else {
+                let c = contentCenter(key)
+                r = CGRect(x: c.x - imgW(key) * effScale/2, y: c.y - imgH(key) * effScale/2,
+                           width: imgW(key) * effScale, height: imgH(key) * effScale)
+            }
+            u = (u == nil) ? r : u!.union(r)
+        }
+        return u?.insetBy(dx: -8, dy: -8)
+    }
 
     private func bringToFront() {
         materializeOrder(); let sel = order.filter { selected.contains($0) }
@@ -1198,6 +1352,11 @@ struct InfiniteCanvasView: View {
     private var marqueeGesture: some Gesture {
         DragGesture(minimumDistance: 5)
             .onChanged { v in
+                // Drawing the export frame? Lock to the chosen aspect; don't box-select.
+                if let a = exportDrawAspect {
+                    exportRect = exportRectFromDrag(start: v.startLocation, current: v.location, aspect: a)
+                    return
+                }
                 let r = CGRect(x: min(v.startLocation.x, v.location.x),
                                y: min(v.startLocation.y, v.location.y),
                                width: abs(v.location.x - v.startLocation.x),
@@ -1205,7 +1364,20 @@ struct InfiniteCanvasView: View {
                 marquee = r
                 selectInMarquee(r)
             }
-            .onEnded { _ in marquee = nil }
+            .onEnded { _ in
+                if exportDrawAspect != nil { exportDrawAspect = nil; return }  // frame drawn → show handles
+                marquee = nil
+            }
+    }
+
+    /// Aspect-locked export rect (content coords) from a screen-space drag.
+    private func exportRectFromDrag(start: CGPoint, current: CGPoint, aspect: CGFloat) -> CGRect {
+        let sx = (start.x - pan.width) / effScale, sy = (start.y - pan.height) / effScale
+        let cx = (current.x - pan.width) / effScale, cy = (current.y - pan.height) / effScale
+        let w = max(abs(cx - sx), 1), h = w / aspect
+        let x = cx >= sx ? sx : sx - w
+        let y = cy >= sy ? sy : sy - h
+        return CGRect(x: x, y: y, width: w, height: h)
     }
 
     private func selectInMarquee(_ r: CGRect) {
@@ -1260,36 +1432,39 @@ struct InfiniteCanvasView: View {
         .allowsHitTesting(false)
     }
 
-    // Top-left: text, background colour + eyedropper, grid/dots, export.
+    // Top-left: text, background colour + eyedropper, grid/dots, quality, export.
     private func topControls(viewport: CGSize) -> some View {
         HStack(spacing: 10) {
-            Button { addText(viewport: viewport) } label: { Image(systemName: "textbox") }
-                .help("添加文本")
+            Button { addText(viewport: viewport) } label: {
+                Text("T").font(.system(size: 15, weight: .semibold))
+            }
+            .help("添加文本")
             Divider().frame(height: 16)
+            // Square colour well: native ColorPicker (so it opens the picker) clipped square.
             ColorPicker("", selection: $bgColor, supportsOpacity: false)
                 .labelsHidden()
-                .frame(width: 24)
+                .frame(width: 22, height: 22)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.4), lineWidth: 1))
                 .onChange(of: bgColor) { _ in persist() }
                 .help("画布底色")
             Button { sampleColor() } label: { Image(systemName: "eyedropper") }
                 .help("吸管：从屏幕取色作为底色")
-            // Background pattern, tiled inline
-            Picker("", selection: $gridStyle) {
-                Image(systemName: "slash.circle").tag("none")
-                Image(systemName: "grid").tag("grid")
-                Image(systemName: "circle.grid.2x2").tag("dots")
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .onChange(of: gridStyle) { _ in persist() }
-            .help("背景：无 / 网格 / 点阵")
             Divider().frame(height: 16)
-            // Render quality: lower = smaller thumbnails = smoother with many images.
-            Picker("", selection: $renderQuality) {
-                Text("低").tag(0); Text("中").tag(1); Text("高").tag(2)
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .onChange(of: renderQuality) { _ in styledCache.removeAll(); styledAspectCache.removeAll() }
-            .help("渲染质量：低更流畅 / 高更清晰")
+            // Background pattern — ghost buttons (no segmented chrome/shadow).
+            ghostIcon("slash.circle", active: gridStyle == "none", "无背景") { gridStyle = "none"; persist() }
+            ghostIcon("grid", active: gridStyle == "grid", "网格") { gridStyle = "grid"; persist() }
+            ghostIcon("circle.grid.2x2", active: gridStyle == "dots", "点阵") { gridStyle = "dots"; persist() }
+            Divider().frame(height: 16)
+            // Render quality — ghost text buttons (Low / High).
+            ghostText("Low", active: renderQuality <= 0) { renderQuality = 0; styledCache.removeAll(); styledAspectCache.removeAll() }
+            ghostText("High", active: renderQuality >= 1) { renderQuality = 1; styledCache.removeAll(); styledAspectCache.removeAll() }
+            Divider().frame(height: 16)
+            Button { fitToContent(viewport: viewport) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                .help("一键全屏展示全部内容")
+            Button { resetView(viewport: viewport) } label: { Image(systemName: "arrow.counterclockwise") }
+                .foregroundColor(.red)
+                .help("复原默认排列")
             Divider().frame(height: 16)
             Menu {
                 Button("当前视图范围（150dpi）") { exportViewport() }
@@ -1308,21 +1483,19 @@ struct InfiniteCanvasView: View {
         .padding(12)
     }
 
-    // Bottom-left: zoom / fit / reset.
-    private func zoomControls(viewport: CGSize) -> some View {
-        HStack(spacing: 8) {
-            Button { zoom(1 / 1.25, viewport: viewport) } label: { Image(systemName: "minus.magnifyingglass") }
-            Text("\(Int(scale * 100))%").font(.caption.monospacedDigit()).frame(width: 44)
-            Button { zoom(1.25, viewport: viewport) } label: { Image(systemName: "plus.magnifyingglass") }
-            Button { fitToContent(viewport: viewport) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
-                .help("一键全屏展示全部内容")
-            Button { resetView(viewport: viewport) } label: { Image(systemName: "arrow.counterclockwise") }
-                .foregroundColor(.red)
-                .help("复原默认排列")
+    // Flat "ghost" buttons (no background/shadow) for the toolbar toggles.
+    @ViewBuilder private func ghostIcon(_ name: String, active: Bool, _ help: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: name) }
+            .buttonStyle(.borderless)
+            .foregroundColor(active ? .accentColor : .secondary)
+            .help(help)
+    }
+    @ViewBuilder private func ghostText(_ label: String, active: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label).font(.system(size: 12, weight: .semibold, design: .rounded))
         }
-        .padding(8)
-        .background(.regularMaterial, in: Capsule())
-        .padding(12)
+        .buttonStyle(.borderless)
+        .foregroundColor(active ? .accentColor : .secondary)
     }
 
     private func sampleColor() {
@@ -1452,22 +1625,42 @@ struct InfiniteCanvasView: View {
         }
 
         // Draw in z-order so images & texts interleave the same as on-canvas.
+        let byId = Dictionary(screenshots.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { a, _ in a })
         for key in displayOrder {
             if key.hasPrefix("t:") {
                 guard let t = texts.first(where: { textKey($0) == key }), !t.text.isEmpty else { continue }
                 let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.black]
                 let sz = (t.text as NSString).size(withAttributes: attrs)
                 (t.text as NSString).draw(at: NSPoint(x: t.x - sz.width/2, y: t.y - sz.height/2), withAttributes: attrs)
-            } else if let ss = screenshots.first(where: { $0.id.uuidString == key }),
-                      let raw = FileStorageManager.shared.load(fileName: ss.fileName) {
-                let img = ImageStyler.styled(raw, whiteEdge: whiteEdge.contains(key), polaroid: polaroid.contains(key))
+            } else if let ss = byId[key] {
                 let w = imgW(key), h = imgH(key), p = positions[key] ?? .zero
+                // Skip images fully outside the export rect (halfDiag covers any rotation).
+                let halfDiag = sqrt(w*w + h*h) / 2 + 1
+                guard CGRect(x: p.x - halfDiag, y: p.y - halfDiag, width: halfDiag*2, height: halfDiag*2).intersects(rect) else { continue }
+                // Load only the pixels the output needs instead of the full-resolution
+                // original — far less decode + styling work, same output sharpness.
+                let need = ceil(max(w, h) * drawScale * 1.2)
+                guard let raw = FileStorageManager.shared.thumbnail(fileName: ss.fileName, maxPixel: need) else { continue }
+                let img = ImageStyler.styled(raw, whiteEdge: whiteEdge.contains(key), polaroid: polaroid.contains(key))
                 NSGraphicsContext.saveGraphicsState()
+                // Match the on-canvas drop shadow (skipped for images with shadow turned off).
+                if !noShadow.contains(key) {
+                    let sh = NSShadow()
+                    sh.shadowColor = NSColor.black.withAlphaComponent(0.20)
+                    sh.shadowOffset = NSSize(width: 0, height: -4)   // flipped ctx → downward
+                    sh.shadowBlurRadius = 9
+                    sh.set()
+                }
                 let xf = NSAffineTransform()
                 xf.translateX(by: p.x, yBy: p.y)
                 if let rot = rotations[key], rot != 0 { xf.rotate(byDegrees: rot) }
                 xf.concat()
-                img.draw(in: NSRect(x: -w/2, y: -h/2, width: w, height: h))
+                // Preserve the image's real aspect (fit inside w×h, centred) just like the
+                // canvas's scaledToFit — never stretch, so export matches what's on screen.
+                let ia = img.size.height > 0 ? img.size.width / img.size.height : 1
+                var dw = w, dh = w / ia
+                if dh > h { dh = h; dw = h * ia }
+                img.draw(in: NSRect(x: -dw/2, y: -dh/2, width: dw, height: dh))
                 NSGraphicsContext.restoreGraphicsState()
             }
         }
@@ -1498,20 +1691,21 @@ struct InfiniteCanvasView: View {
         if let img = renderCanvas(contentRect: viewportContentRect(), target: nil, dpi: 150) { savePNG(img) }
     }
 
-    // Show an aspect-locked export frame over the canvas; user adjusts then confirms.
+    // Enter "draw the export frame" mode: the user drags on the canvas to draw an
+    // aspect-locked rectangle, then adjusts handles and confirms.
     private func beginExportFrame(_ target: CGSize, viewport: CGSize) {
         exportTarget = target
-        let aspect = target.width / target.height
-        let base = contentBoundingBox() ?? viewportContentRect()
-        var w = base.width, h = w / aspect
-        if h < base.height { h = base.height; w = h * aspect }
-        exportRect = CGRect(x: base.midX - w/2, y: base.midY - h/2, width: w, height: h)
+        exportRect = nil
+        exportDrawAspect = target.width / target.height
+    }
+    private func cancelExportFrame() {
+        exportRect = nil; exportTarget = nil; exportDrawAspect = nil; exportDragStart = nil
     }
 
     private func confirmExport() {
         guard let rect = exportRect, let target = exportTarget else { return }
         if let img = renderCanvas(contentRect: rect, target: target) { savePNG(img) }
-        exportRect = nil; exportTarget = nil
+        exportRect = nil; exportTarget = nil; exportDrawAspect = nil
     }
 
     private func promptCustomSize(viewport: CGSize) {
@@ -1612,11 +1806,7 @@ struct InfiniteCanvasView: View {
         whiteEdge = Set(l.whiteEdge)
         polaroid = Set(l.polaroid)
         noShadow = Set(l.noShadow)
-        for ss in screenshots {
-            if let img = FileStorageManager.shared.thumbnail(fileName: ss.fileName) {
-                aspects[ss.id.uuidString] = img.size.width / max(img.size.height, 1)
-            }
-        }
+        ensureAspects()
         layout(in: size)
         order = displayOrder   // materialize (append any new keys)
     }
@@ -1700,6 +1890,7 @@ struct CanvasItemView: View {
     let width: CGFloat
     let height: CGFloat
     let selected: Bool
+    var multiSelected: Bool = false   // part of a multi-selection → defer chrome to the unified frame
     var locked: Bool = false
     var onSelect: () -> Void
     var onMove: (CGSize) -> Void
@@ -1727,11 +1918,11 @@ struct CanvasItemView: View {
         }
         .frame(width: width, height: height)
         .cornerRadius(6)   // also clips (scaledToFit never overflows, so no separate .clipped() needed)
-        .shadow(color: (noShadow || interacting) ? .clear : .black.opacity(0.25),
-                radius: (noShadow || interacting) ? 0 : 4, y: (noShadow || interacting) ? 0 : 2)
+        .shadow(color: (noShadow || interacting) ? .clear : .black.opacity(0.20),
+                radius: (noShadow || interacting) ? 0 : 9, y: (noShadow || interacting) ? 0 : 4)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 2)
+                .stroke(selected && !multiSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         )
         // Lock badge (top-right, clear of the frame button row)
         .overlay(alignment: .topTrailing) {
@@ -1745,13 +1936,13 @@ struct CanvasItemView: View {
         // Frame-style toolbar (white edge / Polaroid / shadow) to the right of the frame,
         // vertically centered. Hidden when locked (unlock via right-click).
         .overlay(alignment: .trailing) {
-            if selected && !locked {
+            if selected && !locked && !multiSelected {
                 frameButtons().offset(x: 34)
             }
         }
         // Resize handle (bottom-right)
         .overlay(alignment: .bottomTrailing) {
-            if selected && !locked {
+            if selected && !locked && !multiSelected {
                 Circle().fill(Color.accentColor)
                     .frame(width: 16, height: 16)
                     .overlay(Image(systemName: "arrow.down.right").font(.system(size: 8, weight: .bold)).foregroundColor(.white))
@@ -1768,7 +1959,7 @@ struct CanvasItemView: View {
         }
         // Rotation handle (top-center)
         .overlay(alignment: .top) {
-            if selected && !locked {
+            if selected && !locked && !multiSelected {
                 Circle().fill(Color.accentColor)
                     .frame(width: 16, height: 16)
                     .overlay(Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 8, weight: .bold)).foregroundColor(.white))
@@ -1819,7 +2010,7 @@ struct CanvasDropDelegate: DropDelegate {
                 else if let d = item as? Data { url = URL(dataRepresentation: d, relativeTo: nil) }
                 guard let fileURL = url,
                       let img = NSImage(contentsOf: fileURL),
-                      let name = FileStorageManager.shared.save(image: img) else { return }
+                      let name = FileStorageManager.shared.save(image: img, into: DataStore.shared.subdirName(for: folderId)) else { return }
                 DispatchQueue.main.async {
                     let ss = Screenshot(fileName: name, createdAt: Date(), folderId: folderId)
                     DataStore.shared.addScreenshot(ss)

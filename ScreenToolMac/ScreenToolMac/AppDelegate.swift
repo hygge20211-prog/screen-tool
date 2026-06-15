@@ -37,6 +37,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Show the main window right away so the app is easy to find
         openGallery()
+        // One-time: shrink pre-existing oversized/lossless screenshots (runs in background).
+        DataStore.shared.recompressAllIfNeeded()
+        // One-time: move pre-existing flat files into per-folder subdirectories on disk.
+        DataStore.shared.migrateToFoldersIfNeeded()
     }
 
     // Reopen the gallery window when the Dock icon is clicked

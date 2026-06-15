@@ -2,8 +2,15 @@ import AppKit
 
 /// How the user draws the selection region.
 enum CaptureMode {
-    case freeform    // click vertices and/or drag freehand (polygon + lasso) — the default
-    case rectangle   // drag a rectangle
+    case freeform     // click vertices and/or drag freehand (polygon + lasso) — the default
+    case rectangle    // drag a rectangle
+    case circle       // drag a bounding box → ellipse/circle
+    case roundedRect  // drag a bounding box → rounded rectangle
+    case heart        // drag a bounding box → heart
+    case star         // drag a bounding box → 5-point star
+
+    /// Shapes that are drawn by dragging a bounding box (everything except freeform).
+    var isBoxShape: Bool { self != .freeform }
 }
 
 class CaptureCoordinator: NSObject {
@@ -139,11 +146,13 @@ extension CaptureCoordinator: LassoOverlayDelegate {
         guard let cgImg = capturedCGImage else { return }
         capturedCGImage = nil
 
+        let targetFolder = DataStore.shared.currentFolderId
         guard let cropped = crop(cgImage: cgImg, path: path, scale: scale),
-              let fileName = FileStorageManager.shared.save(image: cropped) else { return }
+              let fileName = FileStorageManager.shared.save(image: cropped,
+                                into: DataStore.shared.subdirName(for: targetFolder)) else { return }
 
         let screenshot = Screenshot(fileName: fileName, createdAt: Date(),
-                                    folderId: DataStore.shared.currentFolderId)
+                                    folderId: targetFolder)
         DataStore.shared.addScreenshot(screenshot)
         showToast("截图已保存")
     }
@@ -363,12 +372,17 @@ enum ImageStyler {
         return out
     }
 
-    /// A white Polaroid frame (wider bottom margin).
+    /// A white Polaroid frame that KEEPS the photo's aspect ratio (the card is scaled up
+    /// by the same factor in both dimensions), with a thicker bottom margin.
     static func addPolaroid(_ base: NSImage) -> NSImage {
         let s = base.size
         guard s.width > 0, s.height > 0 else { return base }
-        let side = s.width * 0.06, top = s.width * 0.06, bottom = s.width * 0.20
-        let newSize = NSSize(width: s.width + 2*side, height: s.height + top + bottom)
+        let scale: CGFloat = 1 / 0.84                 // photo occupies ~84% → card aspect == photo aspect
+        let newW = s.width * scale, newH = s.height * scale
+        let side = (newW - s.width) / 2
+        let vTotal = newH - s.height
+        let bottom = vTotal * 0.7                      // bottom margin bigger (top = vTotal*0.3)
+        let newSize = NSSize(width: newW, height: newH)
         let out = NSImage(size: newSize)
         out.lockFocus()
         NSColor.white.set()
