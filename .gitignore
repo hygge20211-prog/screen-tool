@@ -3,6 +3,7 @@
 
 # Xcode build output / user state
 build/
+build-release/
 DerivedData/
 *.xcuserstate
 xcuserdata/
