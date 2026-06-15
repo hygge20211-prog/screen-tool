@@ -109,7 +109,9 @@ struct GalleryView: View {
                             case .gallery: galleryModeView
                             case .canvas:  InfiniteCanvasView(screenshots: currentScreenshots,
                                                               folderId: isAllSelected ? nil : selectedFolderId,
-                                                              menu: { ss in AnyView(contextMenu(for: ss)) })
+                                                              onViewLarge: { openInGallery($0) },
+                                                              onRename: { renameText = $0.name ?? ""; renamingScreenshot = $0 },
+                                                              onRecrop: { onRecrop($0) })
                                 .id(isAllSelected ? "all" : (selectedFolderId?.uuidString ?? "none"))
                             }
                         }
@@ -799,7 +801,11 @@ struct ImageViewerView: View {
 struct InfiniteCanvasView: View {
     let screenshots: [Screenshot]
     let folderId: UUID?
-    var menu: (Screenshot) -> AnyView
+    // Actions that need GalleryView state — the rest of the right-click menu is built
+    // directly here (NOT via an AnyView, which would stop the menu buttons from firing).
+    var onViewLarge: (Screenshot) -> Void = { _ in }
+    var onRename: (Screenshot) -> Void = { _ in }
+    var onRecrop: (Screenshot) -> Void = { _ in }
 
     @State private var positions: [String: CGPoint] = [:]   // content coords (center)
     @State private var sizes: [String: CGFloat] = [:]       // per-image width (content pts)
@@ -1220,7 +1226,6 @@ struct InfiniteCanvasView: View {
     @ViewBuilder private func canvasImageMenu(_ ss: Screenshot, _ key: String) -> some View {
         let n = selected.filter { !$0.hasPrefix("t:") }.count
         let multi = n > 1 && selected.contains(key)
-        // Two independent `if`s (not if/else) so the context menu wires up every button.
         if multi {
             Button { copySelectedImages() } label: { Label("复制 \(n) 张图片", systemImage: "doc.on.doc") }
             Menu {
@@ -1231,7 +1236,21 @@ struct InfiniteCanvasView: View {
             Divider()
         }
         if !multi {
-            menu(ss)
+            Button { onViewLarge(ss) } label: { Label("查看大图", systemImage: "eye") }
+            Button { NSWorkspace.shared.open(FileStorageManager.shared.url(for: ss.fileName)) } label: { Label("在预览中打开", systemImage: "macwindow") }
+            Button { NSWorkspace.shared.selectFile(FileStorageManager.shared.url(for: ss.fileName).path, inFileViewerRootedAtPath: "") } label: { Label("在 Finder 中显示", systemImage: "folder") }
+            Button {
+                if let img = FileStorageManager.shared.load(fileName: ss.fileName) {
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects([img])
+                }
+            } label: { Label("复制图片", systemImage: "doc.on.doc") }
+            Button { onRename(ss) } label: { Label("重命名", systemImage: "pencil") }
+            Button { onRecrop(ss) } label: { Label("重新裁剪", systemImage: "crop") }
+            Menu {
+                Button("未分类") { DataStore.shared.move(ss, to: nil) }
+                ForEach(DataStore.shared.folders) { f in Button(f.name) { DataStore.shared.move(ss, to: f.id) } }
+            } label: { Label("移动到…", systemImage: "folder") }
+            Button(role: .destructive) { deleteKey(key) } label: { Label("删除", systemImage: "trash") }
             Divider()
         }
         layerLockGroupMenu(key)
